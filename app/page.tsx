@@ -8,7 +8,7 @@ type PageProps = {
 };
 
 const states: WorkspaceState[] = ["empty", "training", "ready", "chat", "auto", "error"];
-const modals: ModalKey[] = ["newCharacter", "styleSettings", "upload", "deleteConfirm"];
+const modals: ModalKey[] = ["newCharacter", "styleSettings", "upload", "deleteConfirm", "calibration"];
 
 function parseState(value: string | undefined): WorkspaceState {
   if (value && states.includes(value as WorkspaceState)) {

@@ -1,0 +1,76 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Character {
+  id           String   @id @default(cuid())
+  name         String
+  category     String
+  type         String   @default("主播")
+  status       String   @default("ready")
+  styleSummary String?
+  avatarLetter String
+  avatarColor  String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  materials    Material[]
+  chunks       Chunk[]
+  exemplars    Exemplar[]
+
+  @@index([createdAt])
+}
+
+model Material {
+  id           String    @id @default(cuid())
+  characterId  String
+  filename     String
+  rawText      String
+  wordCount    Int       @default(0)
+  status       String    @default("training")
+  stage        String    @default("切片")
+  progress     Int       @default(0)
+  errorMessage String?
+  uploadedAt   DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  character    Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  chunks       Chunk[]
+  exemplars    Exemplar[]
+
+  @@index([characterId, uploadedAt])
+}
+
+model Chunk {
+  id            String    @id @default(cuid())
+  characterId   String
+  materialId    String
+  chunkIndex    Int
+  content       String
+  embeddingJson String
+  tokenCount    Int
+  createdAt     DateTime  @default(now())
+  character     Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  material      Material  @relation(fields: [materialId], references: [id], onDelete: Cascade)
+
+  @@index([characterId])
+  @@index([materialId])
+}
+
+model Exemplar {
+  id               String    @id @default(cuid())
+  characterId      String
+  sourceMaterialId String?
+  kind             String
+  content          String
+  note             String?
+  createdAt        DateTime  @default(now())
+  character        Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  sourceMaterial   Material?  @relation(fields: [sourceMaterialId], references: [id], onDelete: SetNull)
+
+  @@index([characterId, kind])
+  @@index([sourceMaterialId])
+}

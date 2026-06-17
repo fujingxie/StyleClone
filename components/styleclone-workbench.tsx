@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
   Copy,
+  Download,
   FileText,
+  Menu,
   Plus,
   RefreshCw,
   Send,
@@ -20,58 +22,118 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 export type WorkspaceState = "empty" | "training" | "ready" | "chat" | "auto" | "error";
-export type ModalKey = "newCharacter" | "styleSettings" | "upload" | "deleteConfirm";
+export type ModalKey = "newCharacter" | "styleSettings" | "upload" | "deleteConfirm" | "calibration";
 
 type Category = "jewel" | "fresh" | "group" | "other";
 type ScriptKind = "open" | "sell" | "inter" | "obj" | "close";
+type AvatarColor = "violet" | "rose" | "green" | "gray";
+type CharacterStatus = "training" | "ready" | "error";
+type ChatRole = "user" | "assistant";
 
 type Character = {
   id: string;
   name: string;
-  letter: string;
+  avatarLetter: string;
+  avatarColor: AvatarColor;
   category: Category;
-  avatar: "violet" | "rose" | "green" | "gray";
+  status: CharacterStatus;
+  type: string;
   disabled?: boolean;
   soon?: boolean;
 };
+
+type ChatMessage = {
+  id: string;
+  role: ChatRole;
+  streaming?: boolean;
+  text: string;
+};
+
+type ToastKind = "success" | "error" | "info";
+
+type ToastState = {
+  id: string;
+  kind: ToastKind;
+  message: string;
+};
+
+type AutoScriptMessage = {
+  id: string;
+  kind: ScriptKind;
+  streaming?: boolean;
+  text: string;
+};
+
+type TrainingStatusSnapshot = {
+  characterId: string;
+  chunkCount: number;
+  errorMessage: string | null;
+  exemplarCount: number;
+  filename: string | null;
+  materialId: string | null;
+  progress: number;
+  stage: string;
+  status: CharacterStatus;
+  styleSummary: string | null;
+  wordCount: number;
+};
+
+type CalibrationApiResponse = {
+  error?: string;
+  exemplarCount?: number;
+  sample?: string | null;
+  savedExtraCount?: number;
+  styleStrength?: number;
+};
+
+type CalibrationRequestPayload = {
+  extraExemplars: string;
+  saveExtraExemplars?: boolean;
+  saveOnly?: boolean;
+  styleStrength: number;
+};
+
+async function requestCharacterCalibration(characterId: string, payload: CalibrationRequestPayload) {
+  const response = await fetch(`/api/characters/${encodeURIComponent(characterId)}/calibrate`, {
+    body: JSON.stringify(payload),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  const data = (await response.json().catch(() => null)) as CalibrationApiResponse | null;
+
+  if (!response.ok) {
+    throw new Error(data?.error ?? `POST /api/characters/${characterId}/calibrate ${response.status}`);
+  }
+
+  return data ?? {};
+}
 
 type StyleCloneWorkbenchProps = {
   initialState: WorkspaceState;
   initialModal: ModalKey | null;
 };
 
-const characters: Character[] = [
-  {
-    id: "jewel",
-    name: "珠宝主播·小雅",
-    letter: "雅",
-    category: "jewel",
-    avatar: "violet",
-  },
-  {
-    id: "fresh",
-    name: "生鲜主播·老张",
-    letter: "张",
-    category: "fresh",
-    avatar: "green",
-  },
-  {
-    id: "group",
-    name: "团购主播·阿珍",
-    letter: "珍",
-    category: "group",
-    avatar: "rose",
-  },
-  {
-    id: "support",
-    name: "客服助手",
-    letter: "客",
-    category: "other",
-    avatar: "gray",
-    disabled: true,
-    soon: true,
-  },
-];
+const fallbackCharacter: Character = {
+  id: "demo-jewel",
+  name: "珠宝主播·小雅",
+  avatarLetter: "雅",
+  avatarColor: "violet",
+  category: "jewel",
+  status: "ready",
+  type: "主播",
+};
+
+const supportCharacter: Character = {
+  id: "support",
+  name: "客服助手",
+  avatarLetter: "客",
+  avatarColor: "gray",
+  category: "other",
+  status: "ready",
+  type: "客服",
+  disabled: true,
+  soon: true,
+};
 
 const categoryMeta: Record<Category, { label: string; className: string }> = {
   jewel: { label: "珠宝", className: "category-jewel" },
@@ -126,20 +188,130 @@ function fallbackCopyText(text: string) {
   }
 }
 
+function getCharacterNickname(character: Character) {
+  return character.name.split("·").at(-1)?.trim() || character.name;
+}
+
+function createClientId() {
+  return window.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createExportTimestamp(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, "0");
+
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+  ].join("");
+}
+
+function createExportFilename(character: Character, mode: "auto" | "chat") {
+  const safeName = character.name.replace(/[\\/:*?"<>|]/g, "_");
+  return `${safeName}-${mode === "auto" ? "自动台词" : "问答"}-${createExportTimestamp()}.txt`;
+}
+
 export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWorkbenchProps) {
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState>(initialState);
   const [activeModal, setActiveModal] = useState<ModalKey | null>(initialModal);
+  const [characters, setCharacters] = useState<Character[]>([]);
+  const autoAbortController = useRef<AbortController | null>(null);
+  const [autoMessages, setAutoMessages] = useState<AutoScriptMessage[]>([]);
+  const [characterLoadError, setCharacterLoadError] = useState<string | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [isAnswering, setIsAnswering] = useState(false);
+  const [isAutoGenerating, setIsAutoGenerating] = useState(false);
+  const [isCharactersLoading, setIsCharactersLoading] = useState(true);
+  const [isRailOpen, setIsRailOpen] = useState(false);
+  const [selectedCharacterId, setSelectedCharacterId] = useState(fallbackCharacter.id);
+  const [trainingStatus, setTrainingStatus] = useState<TrainingStatusSnapshot | null>(null);
   const [inputValue, setInputValue] = useState("");
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const selectedCharacter =
+    characters.find((character) => character.id === selectedCharacterId) ?? characters[0] ?? fallbackCharacter;
+
+  useEffect(() => {
+    void refreshCharacters({ showLoading: true });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      autoAbortController.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    setTrainingStatus(null);
+  }, [selectedCharacterId]);
 
   useEffect(() => {
     if (!toast) {
       return undefined;
     }
 
-    const timer = window.setTimeout(() => setToast(null), 1800);
+    const timer = window.setTimeout(() => setToast(null), toast.kind === "error" ? 3200 : 2000);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (isCharactersLoading) {
+      return undefined;
+    }
+
+    if (workspaceState !== "training" && selectedCharacter.status !== "training") {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function pollTrainingStatus() {
+      try {
+        const status = await fetchTrainingStatus(selectedCharacter.id);
+
+        if (cancelled) {
+          return;
+        }
+
+        setTrainingStatus(status);
+
+        if (status.status === "ready") {
+          await refreshCharacters();
+
+          if (!cancelled && workspaceState === "training" && activeModal !== "upload") {
+            setWorkspaceState("ready");
+            writeUrl("ready", activeModal);
+            showToast("训练完成", "success");
+          }
+        }
+
+        if (status.status === "error" && workspaceState === "training") {
+          setWorkspaceState("error");
+          writeUrl("error", activeModal);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error(
+            "[StyleClone][pollTrainingStatus] failed",
+            { characterId: selectedCharacter.id, error },
+            new Date().toISOString(),
+          );
+        }
+      }
+    }
+
+    void pollTrainingStatus();
+    const timer = window.setInterval(() => {
+      void pollTrainingStatus();
+    }, 1400);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeModal, isCharactersLoading, selectedCharacter.id, selectedCharacter.status, workspaceState]);
 
   function writeUrl(nextState: WorkspaceState, nextModal: ModalKey | null) {
     const url = new URL(window.location.href);
@@ -167,6 +339,194 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
   function closeModal() {
     setActiveModal(null);
     writeUrl(workspaceState, null);
+  }
+
+  function showToast(message: string, kind: ToastKind = "success") {
+    setToast({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      kind,
+      message,
+    });
+  }
+
+  async function fetchTrainingStatus(characterId: string) {
+    const response = await fetch(`/api/characters/${encodeURIComponent(characterId)}/training-status`);
+    const data = (await response.json().catch(() => null)) as {
+      error?: string;
+      status?: TrainingStatusSnapshot;
+    } | null;
+
+    if (!response.ok) {
+      throw new Error(data?.error ?? `GET /api/characters/${characterId}/training-status ${response.status}`);
+    }
+
+    if (!data?.status) {
+      throw new Error("训练状态为空");
+    }
+
+    return data.status;
+  }
+
+  async function refreshCharacters(options: { showLoading?: boolean } = {}) {
+    if (options.showLoading) {
+      setIsCharactersLoading(true);
+    }
+
+    try {
+      const response = await fetch("/api/characters");
+
+      if (!response.ok) {
+        throw new Error(`GET /api/characters ${response.status}`);
+      }
+
+      const data = (await response.json()) as { characters?: Character[] };
+      const nextCharacters = data.characters ?? [];
+      setCharacters(nextCharacters);
+      setCharacterLoadError(null);
+      setSelectedCharacterId((currentId) => {
+        if (nextCharacters.some((character) => character.id === currentId)) {
+          return currentId;
+        }
+
+        return nextCharacters[0]?.id ?? fallbackCharacter.id;
+      });
+    } catch (error) {
+      console.error("[StyleClone][refreshCharacters] failed", { error }, new Date().toISOString());
+      const message = error instanceof Error ? error.message : "读取角色列表失败";
+      setCharacterLoadError(message);
+      showToast("读取角色列表失败", "error");
+    } finally {
+      if (options.showLoading) {
+        setIsCharactersLoading(false);
+      }
+    }
+  }
+
+  async function createCharacter(input: { category: Category; name: string }) {
+    try {
+      const response = await fetch("/api/characters", {
+        body: JSON.stringify({ ...input, status: "training", type: "主播" }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(`POST /api/characters ${response.status}`);
+      }
+
+      const data = (await response.json()) as { character: Character };
+      setCharacters((current) => [...current, data.character]);
+      setSelectedCharacterId(data.character.id);
+      setActiveModal("upload");
+      setWorkspaceState("training");
+      writeUrl("training", "upload");
+    } catch (error) {
+      console.error("[StyleClone][createCharacter] failed", { error, input }, new Date().toISOString());
+      showToast("创建角色失败", "error");
+    }
+  }
+
+  async function uploadMaterial(input: { characterId: string; filename: string; text: string }) {
+    try {
+      const wordCount = input.text.replace(/\s+/g, "").length;
+
+      setWorkspaceState("training");
+      writeUrl("training", activeModal ?? "upload");
+      setCharacters((current) =>
+        current.map((character) =>
+          character.id === input.characterId ? { ...character, status: "training" } : character,
+        ),
+      );
+      setTrainingStatus({
+        characterId: input.characterId,
+        chunkCount: 0,
+        errorMessage: null,
+        exemplarCount: 0,
+        filename: input.filename,
+        materialId: null,
+        progress: 10,
+        stage: "切片",
+        status: "training",
+        styleSummary: null,
+        wordCount,
+      });
+
+      const response = await fetch(`/api/characters/${input.characterId}/materials`, {
+        body: JSON.stringify({ filename: input.filename, text: input.text }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `POST /api/characters/${input.characterId}/materials ${response.status}`);
+      }
+
+      await refreshCharacters();
+      setSelectedCharacterId(input.characterId);
+      setActiveModal("calibration");
+      setWorkspaceState("ready");
+      writeUrl("ready", "calibration");
+      showToast("素材训练完成，建议校准风格", "success");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "素材训练失败";
+
+      console.error(
+        "[StyleClone][uploadMaterial] failed",
+        { characterId: input.characterId, error },
+        new Date().toISOString(),
+      );
+      setCharacters((current) =>
+        current.map((character) =>
+          character.id === input.characterId ? { ...character, status: "error" } : character,
+        ),
+      );
+      setTrainingStatus((current) =>
+        current?.characterId === input.characterId
+          ? { ...current, errorMessage: message, progress: 0, stage: "失败", status: "error" }
+          : current,
+      );
+      setWorkspaceState("error");
+      writeUrl("error", activeModal);
+      showToast("素材训练失败", "error");
+      throw error;
+    }
+  }
+
+  async function deleteSelectedCharacter() {
+    const selected = characters.find((character) => character.id === selectedCharacterId);
+
+    if (!selected) {
+      setActiveModal(null);
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/characters/${selected.id}`, { method: "DELETE" });
+
+      if (!response.ok) {
+        throw new Error(`DELETE /api/characters/${selected.id} ${response.status}`);
+      }
+
+      const nextCharacters = characters.filter((character) => character.id !== selected.id);
+      setCharacters(nextCharacters);
+      setSelectedCharacterId(nextCharacters[0]?.id ?? fallbackCharacter.id);
+      setActiveModal(null);
+
+      if (nextCharacters.length === 0) {
+        setWorkspaceState("empty");
+        writeUrl("empty", null);
+      } else {
+        writeUrl(workspaceState, null);
+      }
+    } catch (error) {
+      console.error(
+        "[StyleClone][deleteSelectedCharacter] failed",
+        { characterId: selected.id, error },
+        new Date().toISOString(),
+      );
+      showToast("删除角色失败", "error");
+    }
   }
 
   async function copyText(text: string) {
@@ -198,60 +558,423 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
       );
     }
 
-    setToast("已复制到剪贴板");
+    showToast(copied ? "已复制到剪贴板" : "复制失败，请手动选择文本复制", copied ? "success" : "error");
   }
 
-  function handleSend() {
-    if (!inputValue.trim() && workspaceState !== "ready") {
+  async function sendMessage(text: string) {
+    const message = text.trim();
+
+    if (!message || isAnswering) {
       return;
     }
 
+    const assistantId = createClientId();
+    const userId = createClientId();
+
+    setChatMessages((current) => [
+      ...current,
+      { id: userId, role: "user", text: message },
+      { id: assistantId, role: "assistant", streaming: true, text: "" },
+    ]);
     setInputValue("");
     goToState("chat");
+
+    try {
+      setIsAnswering(true);
+
+      const response = await fetch(`/api/characters/${selectedCharacter.id}/chat`, {
+        body: JSON.stringify({ message, topK: 5 }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `POST /api/characters/${selectedCharacter.id}/chat ${response.status}`);
+      }
+
+      if (!response.body) {
+        throw new Error("Chat response body is empty");
+      }
+
+      await readChatStream(response.body, assistantId);
+    } catch (error) {
+      console.error(
+        "[StyleClone][sendMessage] failed",
+        { characterId: selectedCharacter.id, error },
+        new Date().toISOString(),
+      );
+      setChatMessages((current) =>
+        current.map((item) =>
+          item.id === assistantId
+            ? { ...item, streaming: false, text: "生成回复失败，请稍后重试。" }
+            : item,
+        ),
+      );
+      showToast("生成回复失败", "error");
+    } finally {
+      setIsAnswering(false);
+    }
   }
 
-  const hasCharacters = workspaceState !== "empty";
+  async function readChatStream(body: ReadableStream<Uint8Array>, assistantId: string) {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+
+      for (const eventText of events) {
+        handleChatStreamEvent(eventText, assistantId);
+      }
+    }
+
+    setChatMessages((current) =>
+      current.map((item) => (item.id === assistantId ? { ...item, streaming: false } : item)),
+    );
+  }
+
+  function handleChatStreamEvent(eventText: string, assistantId: string) {
+    const event = eventText
+      .split("\n")
+      .find((line) => line.startsWith("event:"))
+      ?.slice(6)
+      .trim();
+    const dataText = eventText
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .join("\n");
+
+    if (!event || !dataText) {
+      return;
+    }
+
+    const data = JSON.parse(dataText) as { message?: string; text?: string };
+
+    if (event === "delta" && data.text) {
+      setChatMessages((current) =>
+        current.map((item) =>
+          item.id === assistantId ? { ...item, text: `${item.text}${data.text}` } : item,
+        ),
+      );
+    }
+
+    if (event === "done") {
+      setChatMessages((current) =>
+        current.map((item) =>
+          item.id === assistantId ? { ...item, streaming: false, text: data.text ?? item.text } : item,
+        ),
+      );
+    }
+
+    if (event === "error") {
+      throw new Error(data.message ?? "Chat stream error");
+    }
+  }
+
+  function handleSend() {
+    void sendMessage(inputValue);
+  }
+
+  async function startAutoGeneration() {
+    if (isAutoGenerating) {
+      return;
+    }
+
+    const controller = new AbortController();
+    autoAbortController.current = controller;
+    setAutoMessages([]);
+    setIsAutoGenerating(true);
+    goToState("auto");
+
+    try {
+      const response = await fetch(`/api/characters/${selectedCharacter.id}/auto/start`, {
+        body: JSON.stringify({ maxSegments: 12 }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const data = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `POST /api/characters/${selectedCharacter.id}/auto/start ${response.status}`);
+      }
+
+      if (!response.body) {
+        throw new Error("Auto response body is empty");
+      }
+
+      await readAutoStream(response.body);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        console.error(
+          "[StyleClone][startAutoGeneration] failed",
+          { characterId: selectedCharacter.id, error },
+          new Date().toISOString(),
+        );
+        showToast("自动生成失败", "error");
+      }
+    } finally {
+      setIsAutoGenerating(false);
+      autoAbortController.current = null;
+    }
+  }
+
+  async function stopAutoGeneration() {
+    autoAbortController.current?.abort();
+    autoAbortController.current = null;
+    setIsAutoGenerating(false);
+    goToState(autoMessages.length > 0 ? "auto" : "ready");
+
+    try {
+      await fetch(`/api/characters/${selectedCharacter.id}/auto/stop`, { method: "POST" });
+    } catch (error) {
+      console.error(
+        "[StyleClone][stopAutoGeneration] failed",
+        { characterId: selectedCharacter.id, error },
+        new Date().toISOString(),
+      );
+    }
+  }
+
+  function getExportPayload() {
+    const exportedAt = new Date().toLocaleString("zh-CN", { hour12: false });
+
+    if (workspaceState === "auto" && autoMessages.some((message) => message.text.trim())) {
+      const body = autoMessages
+        .filter((message) => message.text.trim())
+        .map((message, index) => {
+          const kindLabel = kindMeta[message.kind].label;
+          return `【${index + 1}. ${kindLabel}】\n${message.text.trim()}`;
+        })
+        .join("\n\n");
+
+      return {
+        filename: createExportFilename(selectedCharacter, "auto"),
+        text: [`角色：${selectedCharacter.name}`, `模式：自动台词`, `导出时间：${exportedAt}`, "", body].join("\n"),
+      };
+    }
+
+    if (workspaceState === "chat" && chatMessages.some((message) => message.text.trim())) {
+      const body = chatMessages
+        .filter((message) => message.text.trim())
+        .map((message) => {
+          const role = message.role === "user" ? "用户" : selectedCharacter.name;
+          return `【${role}】\n${message.text.trim()}`;
+        })
+        .join("\n\n");
+
+      return {
+        filename: createExportFilename(selectedCharacter, "chat"),
+        text: [`角色：${selectedCharacter.name}`, `模式：问答`, `导出时间：${exportedAt}`, "", body].join("\n"),
+      };
+    }
+
+    return null;
+  }
+
+  async function copyCurrentExport() {
+    const payload = getExportPayload();
+
+    if (!payload) {
+      showToast("暂无可复制内容", "info");
+      return;
+    }
+
+    await copyText(payload.text);
+    showToast("已复制全部内容", "success");
+  }
+
+  function downloadCurrentExport() {
+    const payload = getExportPayload();
+
+    if (!payload) {
+      showToast("暂无可下载内容", "info");
+      return;
+    }
+
+    const url = window.URL.createObjectURL(new Blob([payload.text], { type: "text/plain;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = payload.filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+    showToast("已下载台词文件", "success");
+  }
+
+  async function readAutoStream(body: ReadableStream<Uint8Array>) {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+
+      for (const eventText of events) {
+        handleAutoStreamEvent(eventText);
+      }
+    }
+  }
+
+  function handleAutoStreamEvent(eventText: string) {
+    const event = eventText
+      .split("\n")
+      .find((line) => line.startsWith("event:"))
+      ?.slice(6)
+      .trim();
+    const dataText = eventText
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .join("\n");
+
+    if (!event || !dataText) {
+      return;
+    }
+
+    const data = JSON.parse(dataText) as {
+      id?: string;
+      kind?: ScriptKind;
+      message?: string;
+      text?: string;
+    };
+
+    if (event === "segment-start" && data.id && data.kind) {
+      const segmentId = data.id;
+      const kind = data.kind;
+
+      setAutoMessages((current) => [
+        ...current,
+        { id: segmentId, kind, streaming: true, text: "" },
+      ]);
+    }
+
+    if (event === "delta" && data.id && data.text) {
+      setAutoMessages((current) =>
+        current.map((item) => (item.id === data.id ? { ...item, text: `${item.text}${data.text}` } : item)),
+      );
+    }
+
+    if (event === "segment-done" && data.id) {
+      setAutoMessages((current) =>
+        current.map((item) =>
+          item.id === data.id ? { ...item, streaming: false, text: data.text ?? item.text } : item,
+        ),
+      );
+    }
+
+    if (event === "error") {
+      throw new Error(data.message ?? "Auto stream error");
+    }
+  }
+
+  const hasCharacters = !isCharactersLoading && workspaceState !== "empty" && characters.length > 0;
+  const canExport =
+    (workspaceState === "chat" && chatMessages.some((message) => message.text.trim())) ||
+    (workspaceState === "auto" && autoMessages.some((message) => message.text.trim()));
 
   return (
-    <div className="workspace">
+    <div className={cn("workspace", isRailOpen && "rail-open")}>
+      <button
+        aria-label="打开角色列表"
+        className="rail-toggle"
+        onClick={() => setIsRailOpen(true)}
+        title="角色列表"
+        type="button"
+      >
+        <Menu size={18} />
+      </button>
+      <button aria-label="关闭角色列表" className="rail-scrim" onClick={() => setIsRailOpen(false)} type="button" />
       <LeftRail
+        characters={hasCharacters ? [...characters, supportCharacter] : []}
         empty={!hasCharacters}
-        onDelete={() => openModal("deleteConfirm")}
-        onNewCharacter={() => openModal("newCharacter")}
-        onSettings={() => openModal("styleSettings")}
+        loading={isCharactersLoading}
+        onClose={() => setIsRailOpen(false)}
+        onDelete={() => {
+          setIsRailOpen(false);
+          openModal("deleteConfirm");
+        }}
+        onNewCharacter={() => {
+          setIsRailOpen(false);
+          openModal("newCharacter");
+        }}
+        onSelect={(id) => {
+          setSelectedCharacterId(id);
+          setIsRailOpen(false);
+        }}
+        onSettings={() => {
+          setIsRailOpen(false);
+          openModal("styleSettings");
+        }}
+        selectedCharacterId={selectedCharacterId}
       />
 
       <main className="main-col">{renderMain()}</main>
 
       <ModalHost
         activeModal={activeModal}
+        character={selectedCharacter}
         closeModal={closeModal}
-        copyText={copyText}
-        deleteCharacter={() => {
-          setActiveModal(null);
-          setWorkspaceState("empty");
-          writeUrl("empty", null);
+        createCharacter={createCharacter}
+        deleteCharacter={deleteSelectedCharacter}
+        onCalibrationSaved={(savedExtraCount) => {
+          showToast(savedExtraCount > 0 ? `已保存 ${savedExtraCount} 条校准范本` : "风格校准完成", "success");
         }}
-        startTraining={() => {
-          setActiveModal(null);
-          setWorkspaceState("training");
-          writeUrl("training", null);
-        }}
+        uploadMaterial={uploadMaterial}
       />
 
       {toast && (
-        <div className="toast" role="status">
+        <div className={cn("toast", toast.kind)} key={toast.id} role={toast.kind === "error" ? "alert" : "status"}>
           <span className="toast-icon">
-            <Check size={12} />
+            {toast.kind === "error" ? <AlertCircle size={12} /> : <Check size={12} />}
           </span>
-          {toast}
+          {toast.message}
         </div>
       )}
     </div>
   );
 
   function renderMain() {
-    if (workspaceState === "empty") {
+    if (isCharactersLoading) {
+      return (
+        <div className="flow-area bg-white">
+          <LoadingState description="正在读取本地角色、素材和训练状态。" title="加载角色库" />
+        </div>
+      );
+    }
+
+    if (characterLoadError && characters.length === 0) {
+      return (
+        <div className="flow-area bg-white">
+          <LoadErrorView
+            description={characterLoadError}
+            onRetry={() => void refreshCharacters({ showLoading: true })}
+          />
+        </div>
+      );
+    }
+
+    if (workspaceState === "empty" || characters.length === 0) {
       return (
         <>
           <div className="flow-area bg-white">
@@ -269,7 +992,7 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
     }
 
     const headerStatus =
-      workspaceState === "auto"
+      workspaceState === "auto" && isAutoGenerating
         ? "running"
         : workspaceState === "training"
           ? "training"
@@ -280,32 +1003,69 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
     return (
       <>
         <CharacterHeader
+          canExport={canExport}
+          character={selectedCharacter}
+          onCopyAll={() => void copyCurrentExport()}
+          onDownloadExport={downloadCurrentExport}
+          onOpenCalibration={() => openModal("calibration")}
           onOpenSettings={() => openModal("styleSettings")}
-          onRetryTraining={() => goToState("training")}
-          onToggleAuto={() => goToState(workspaceState === "auto" ? "chat" : "auto")}
+          onRetryTraining={() => openModal("upload")}
+          onToggleAuto={() => {
+            if (workspaceState === "auto") {
+              void stopAutoGeneration();
+            } else {
+              void startAutoGeneration();
+            }
+          }}
+          onUploadMaterial={() => openModal("upload")}
           status={headerStatus}
+          trainingStatus={trainingStatus}
         />
         <div className="flow-area">
-          {workspaceState === "training" && <TrainingView />}
+          {workspaceState === "training" && <TrainingView character={selectedCharacter} status={trainingStatus} />}
           {workspaceState === "ready" && (
             <ReadyView
+              character={selectedCharacter}
               ask={(text) => {
-                setInputValue(text);
-                goToState("chat");
+                void sendMessage(text);
               }}
             />
           )}
-          {workspaceState === "chat" && <ChatView copyText={copyText} />}
-          {workspaceState === "auto" && <AutoView copyText={copyText} />}
+          {workspaceState === "chat" && <ChatView copyText={copyText} messages={chatMessages} />}
+          {workspaceState === "auto" && (
+            <AutoView
+              copyText={copyText}
+              generatedCount={isAutoGenerating || autoMessages.length > 0 ? autoMessages.length : 7}
+              running={isAutoGenerating || autoMessages.length === 0}
+              messages={autoMessages}
+            />
+          )}
           {workspaceState === "error" && (
             <ErrorView
-              onRetry={() => goToState("training")}
+              status={trainingStatus}
+              onRefresh={() => {
+                void fetchTrainingStatus(selectedCharacter.id)
+                  .then((status) => {
+                    setTrainingStatus(status);
+                    showToast("训练状态已刷新", "info");
+                  })
+                  .catch((error) => {
+                    console.error(
+                      "[StyleClone][ErrorView][refresh] failed",
+                      { characterId: selectedCharacter.id, error },
+                      new Date().toISOString(),
+                    );
+                    showToast("刷新训练状态失败", "error");
+                  });
+              }}
               onUpload={() => openModal("upload")}
             />
           )}
         </div>
         <InputFooter
-          disabled={workspaceState === "training" || workspaceState === "auto" || workspaceState === "error"}
+          disabled={
+            workspaceState === "training" || (workspaceState === "auto" && isAutoGenerating) || workspaceState === "error"
+          }
           disabledText={
             workspaceState === "auto"
               ? "自动化进行中，正在按节奏生成台词…"
@@ -317,6 +1077,7 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
           inputValue={inputValue}
           onInputChange={setInputValue}
           onSend={handleSend}
+          sending={isAnswering}
         />
       </>
     );
@@ -324,27 +1085,52 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
 }
 
 function LeftRail({
+  characters,
   empty,
+  loading,
+  onClose,
   onDelete,
   onNewCharacter,
+  onSelect,
   onSettings,
+  selectedCharacterId,
 }: {
+  characters: Character[];
   empty: boolean;
+  loading: boolean;
+  onClose: () => void;
   onDelete: () => void;
   onNewCharacter: () => void;
+  onSelect: (id: string) => void;
   onSettings: () => void;
+  selectedCharacterId: string;
 }) {
   return (
     <aside className="left-rail">
-      <div className="p-4">
+      <div className="rail-head p-4">
         <Button className="w-full" onClick={onNewCharacter}>
           <Plus size={16} />
           新建角色
         </Button>
+        <button aria-label="关闭角色列表" className="rail-close" onClick={onClose} type="button">
+          <X size={16} />
+        </button>
       </div>
 
       <div className="rail-list">
-        {empty ? (
+        {loading ? (
+          <div className="rail-skeleton">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <div className="rail-skeleton-row" key={index}>
+                <span className="skeleton-circle" />
+                <span className="min-w-0 flex-1">
+                  <span className="skeleton-line w-[72%]" />
+                  <span className="skeleton-line mt-2 w-[42%]" />
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : empty ? (
           <div className="rail-empty">
             还没有角色
             <br />
@@ -355,23 +1141,25 @@ function LeftRail({
             <button
               className={cn(
                 "char-item text-left",
-                character.id === "jewel" && "selected",
+                character.id === selectedCharacterId && "selected",
                 character.disabled && "disabled",
               )}
               disabled={character.disabled}
               key={character.id}
+              onClick={() => onSelect(character.id)}
               onContextMenu={(event) => {
-                if (character.id !== "jewel") {
+                if (character.disabled) {
                   return;
                 }
 
                 event.preventDefault();
+                onSelect(character.id);
                 onDelete();
               }}
-              title={character.id === "jewel" ? "右键删除角色" : undefined}
+              title={character.disabled ? undefined : "右键删除角色"}
               type="button"
             >
-              <Avatar color={character.avatar} letter={character.letter} size={40} />
+              <Avatar color={character.avatarColor} letter={character.avatarLetter} size={40} />
               <span className="min-w-0">
                 <span className="block truncate text-sm font-medium text-text-1">{character.name}</span>
                 <span className="mt-1 block">
@@ -398,36 +1186,79 @@ function LeftRail({
 }
 
 function CharacterHeader({
+  canExport,
+  character,
+  onCopyAll,
+  onDownloadExport,
+  onOpenCalibration,
   onOpenSettings,
   onRetryTraining,
   onToggleAuto,
+  onUploadMaterial,
   status,
+  trainingStatus,
 }: {
+  canExport: boolean;
+  character: Character;
+  onCopyAll: () => void;
+  onDownloadExport: () => void;
+  onOpenCalibration: () => void;
   onOpenSettings: () => void;
   onRetryTraining: () => void;
   onToggleAuto: () => void;
+  onUploadMaterial: () => void;
   status: "training" | "ready" | "running" | "error";
+  trainingStatus: TrainingStatusSnapshot | null;
 }) {
   return (
     <header className="char-header">
-      <Avatar color="violet" letter="雅" size={32} />
-      <span className="t-block">珠宝主播·小雅</span>
-      <CategoryBadge category="jewel" />
+      <Avatar color={character.avatarColor} letter={character.avatarLetter} size={32} />
+      <span className="t-block">{character.name}</span>
+      <CategoryBadge category={character.category} />
       <span className="flex-1" />
-      <StatusPill status={status} />
+      <StatusPill status={status} trainingStatus={trainingStatus} />
       <span className="w-3" />
 
+      {canExport && (
+        <>
+          <Button onClick={onCopyAll} size="sm" title="复制全部内容" variant="secondary">
+            <Copy size={16} />
+            复制全部
+          </Button>
+          <Button onClick={onDownloadExport} size="sm" title="下载台词文本" variant="secondary">
+            <Download size={16} />
+            下载
+          </Button>
+        </>
+      )}
+
       {status === "training" && (
-        <Button onClick={onOpenSettings} size="sm" variant="ghost">
-          <Settings size={16} />
-          设置
-        </Button>
+        <>
+          <Button onClick={onUploadMaterial} size="sm" variant="secondary">
+            <Upload size={16} />
+            上传素材
+          </Button>
+          <Button onClick={onOpenSettings} size="sm" variant="ghost">
+            <Settings size={16} />
+            设置
+          </Button>
+        </>
       )}
       {status === "ready" && (
-        <button className="auto-toggle idle" onClick={onToggleAuto} type="button">
-          <Sparkles size={16} />
-          <span>开始自动化</span>
-        </button>
+        <>
+          <Button onClick={onOpenCalibration} size="sm" variant="secondary">
+            <Sparkles size={16} />
+            校准
+          </Button>
+          <Button onClick={onUploadMaterial} size="sm" variant="secondary">
+            <Upload size={16} />
+            上传素材
+          </Button>
+          <button className="auto-toggle idle" onClick={onToggleAuto} type="button">
+            <Sparkles size={16} />
+            <span>开始自动化</span>
+          </button>
+        </>
       )}
       {status === "running" && (
         <button className="auto-toggle running" onClick={onToggleAuto} type="button">
@@ -437,20 +1268,30 @@ function CharacterHeader({
       )}
       {status === "error" && (
         <Button onClick={onRetryTraining} size="sm" variant="secondary">
-          <RefreshCw size={16} />
-          重试训练
+          <Upload size={16} />
+          重新上传
         </Button>
       )}
     </header>
   );
 }
 
-function StatusPill({ status }: { status: "training" | "ready" | "running" | "error" }) {
+function StatusPill({
+  status,
+  trainingStatus,
+}: {
+  status: "training" | "ready" | "running" | "error";
+  trainingStatus: TrainingStatusSnapshot | null;
+}) {
   if (status === "training") {
+    const label = trainingStatus
+      ? `训练中 · ${trainingStatus.stage} ${trainingStatus.progress}%`
+      : "训练中 · 等待素材";
+
     return (
       <span className="status-pill text-text-2">
         <span className="dot amber" />
-        训练中 · 抽风格 3/4
+        {label}
       </span>
     );
   }
@@ -481,33 +1322,101 @@ function StatusPill({ status }: { status: "training" | "ready" | "running" | "er
   );
 }
 
-function TrainingView() {
+function formatWordCount(wordCount: number) {
+  if (wordCount >= 10_000) {
+    return `${(wordCount / 10_000).toFixed(1)} 万字`;
+  }
+
+  return `${wordCount.toLocaleString()} 字`;
+}
+
+function getTrainingStageIndex(stage: string) {
+  if (stage.includes("向量")) {
+    return 1;
+  }
+  if (stage.includes("抽风格")) {
+    return 2;
+  }
+  if (stage.includes("抽范本") || stage.includes("完成")) {
+    return 3;
+  }
+
+  return 0;
+}
+
+function getStageState(input: {
+  index: number;
+  stageIndex: number;
+  status: CharacterStatus;
+}): "done" | "active" | "todo" | "error" {
+  if (input.status === "ready") {
+    return "done";
+  }
+  if (input.status === "error" && input.index === input.stageIndex) {
+    return "error";
+  }
+  if (input.index < input.stageIndex) {
+    return "done";
+  }
+  if (input.index === input.stageIndex) {
+    return "active";
+  }
+
+  return "todo";
+}
+
+function TrainingView({ character, status }: { character: Character; status: TrainingStatusSnapshot | null }) {
+  const progress = Math.min(100, Math.max(0, status?.progress ?? 10));
+  const stage = status?.stage ?? "等待素材";
+  const stageIndex = getTrainingStageIndex(stage);
+  const statusLabel = status?.filename
+    ? `${status.filename} · ${formatWordCount(status.wordCount)}`
+    : "等待上传素材后开始训练";
+  const rows = [
+    {
+      label: status?.chunkCount ? `切片 · 已拆 ${status.chunkCount} 段` : "切片 · 把直播稿拆成语段",
+    },
+    { label: "向量化 · 建立语义索引" },
+    { label: "抽风格 · 提炼口吻与节奏" },
+    {
+      label: status?.exemplarCount ? `抽范本 · 已沉淀 ${status.exemplarCount} 条` : "抽范本 · 沉淀高频话术",
+    },
+  ];
+
   return (
     <Flow>
       <section className="train-card">
-        <h2 className="t-block mb-1">正在训练「珠宝主播·小雅」</h2>
-        <p className="t-cap mb-[18px]">已解析 珠宝主播直播稿.txt · 约 4.2 万字</p>
+        <h2 className="t-block mb-1">正在训练「{character.name}」</h2>
+        <p className="t-cap mb-[18px]">{statusLabel}</p>
 
         <div className="progress mb-1">
-          <i style={{ width: "62%" }} />
+          <i style={{ width: `${progress}%` }} />
         </div>
         <div className="mb-[18px] flex justify-between">
-          <span className="t-cap">整体进度</span>
-          <span className="t-cap tabular-nums">62%</span>
+          <span className="t-cap">当前阶段：{stage}</span>
+          <span className="t-cap tabular-nums">{progress}%</span>
         </div>
 
         <div className="stage-list">
-          <StageRow label="切片 · 把直播稿拆成语段" state="done" />
-          <StageRow label="向量化 · 建立语义索引" state="done" />
-          <StageRow label="抽风格 · 提炼口吻与节奏" state="active" />
-          <StageRow index={4} label="抽范本 · 沉淀高频话术" state="todo" />
+          {rows.map((row, index) => (
+            <StageRow
+              index={index + 1}
+              key={row.label}
+              label={row.label}
+              state={getStageState({
+                index,
+                stageIndex,
+                status: status?.status ?? "training",
+              })}
+            />
+          ))}
         </div>
       </section>
     </Flow>
   );
 }
 
-function ReadyView({ ask }: { ask: (text: string) => void }) {
+function ReadyView({ ask, character }: { ask: (text: string) => void; character: Character }) {
   const suggestions = [
     "这条珍珠项链怎么开场",
     "讲讲 18K 金的卖点",
@@ -518,7 +1427,7 @@ function ReadyView({ ask }: { ask: (text: string) => void }) {
   return (
     <EmptyState
       description="用 TA 的口吻生成开场、卖点、互动到逼单的整套话术。"
-      title="小雅已就绪，问点什么试试"
+      title={`${getCharacterNickname(character)}已就绪，问点什么试试`}
     >
       <div className="suggestion-row">
         {suggestions.map((suggestion, index) => (
@@ -532,10 +1441,30 @@ function ReadyView({ ask }: { ask: (text: string) => void }) {
   );
 }
 
-function ChatView({ copyText }: { copyText: (text: string) => void }) {
+function ChatView({ copyText, messages }: { copyText: (text: string) => void; messages: ChatMessage[] }) {
   const roleText =
     "家人们看过来！这条是 18K 金镶天然淡水珍珠，光泽特别温润，颗颗手工挑过，圆度高、瑕疵少。";
   const autoText = "珠子直径 9–10mm，戴上立刻显气质，日常通勤、约会、见客户都能压得住场，一条顶三条。";
+
+  if (messages.length > 0) {
+    return (
+      <Flow>
+        {messages.map((message) =>
+          message.role === "user" ? (
+            <UserMessage key={message.id}>{message.text}</UserMessage>
+          ) : (
+            <RoleMessage
+              copyText={message.text && !message.streaming ? () => copyText(message.text) : undefined}
+              key={message.id}
+              streaming={message.streaming}
+            >
+              {message.text || " "}
+            </RoleMessage>
+          ),
+        )}
+      </Flow>
+    );
+  }
 
   return (
     <Flow>
@@ -551,29 +1480,65 @@ function ChatView({ copyText }: { copyText: (text: string) => void }) {
   );
 }
 
-function AutoView({ copyText }: { copyText: (text: string) => void }) {
+function AutoView({
+  copyText,
+  generatedCount,
+  messages,
+  running,
+}: {
+  copyText: (text: string) => void;
+  generatedCount: number;
+  messages: AutoScriptMessage[];
+  running: boolean;
+}) {
   return (
     <Flow>
       <div className="mb-[22px] flex justify-center">
         <span className="category-badge category-group bg-[#FFEDD5] text-accent-hover">
-          ● 自动化运行中 · 已生成 7 条
+          ● {running ? "自动化运行中" : "自动化已停止"} · 已生成 {generatedCount} 条
         </span>
       </div>
-      {autoScripts.map((script) => (
-        <AutoMessage copyText={() => copyText(script.text)} key={script.kind} kind={script.kind}>
-          {script.text}
-        </AutoMessage>
-      ))}
+      {messages.length > 0
+        ? messages.map((message) => (
+            <AutoMessage
+              copyText={() => {
+                if (message.text && !message.streaming) {
+                  void copyText(message.text);
+                }
+              }}
+              key={message.id}
+              kind={message.kind}
+              streaming={message.streaming}
+            >
+              {message.text || " "}
+            </AutoMessage>
+          ))
+        : autoScripts.map((script) => (
+            <AutoMessage copyText={() => copyText(script.text)} key={script.kind} kind={script.kind}>
+              {script.text}
+            </AutoMessage>
+          ))}
     </Flow>
   );
 }
 
-function ErrorView({ onRetry, onUpload }: { onRetry: () => void; onUpload: () => void }) {
+function ErrorView({
+  onRefresh,
+  onUpload,
+  status,
+}: {
+  onRefresh: () => void;
+  onUpload: () => void;
+  status: TrainingStatusSnapshot | null;
+}) {
+  const detail = status?.errorMessage || "素材训练中断，可重新上传更完整的直播稿后继续。";
+  const meta = status?.stage ? `失败阶段：${status.stage}` : "失败阶段：未知";
+
   return (
     <EmptyState
       artClassName="bg-[#FEE2E2] text-red-600"
       artIcon={AlertCircle}
-      description="素材在「抽风格」阶段中断——可能是直播稿内容过短或格式异常。可重新上传更完整的直播稿后重试。"
+      description={detail}
       title="训练失败"
     >
       <div className="flex gap-2.5">
@@ -581,13 +1546,43 @@ function ErrorView({ onRetry, onUpload }: { onRetry: () => void; onUpload: () =>
           <Upload size={16} />
           重新上传
         </Button>
-        <Button onClick={onRetry}>
+        <Button onClick={onRefresh}>
           <RefreshCw size={16} />
-          重试训练
+          刷新状态
         </Button>
       </div>
-      <span className="t-cap mt-1 text-text-3">错误码 STYLE_EXTRACT_TIMEOUT · 14:32</span>
+      <span className="t-cap mt-1 text-text-3">{meta}</span>
     </EmptyState>
+  );
+}
+
+function LoadingState({ description, title }: { description: string; title: string }) {
+  return (
+    <EmptyState
+      artClassName="loading-art"
+      artIcon={RefreshCw}
+      description={description}
+      title={title}
+    >
+      <div className="loading-lines" aria-hidden="true">
+        <span className="skeleton-line w-[180px]" />
+        <span className="skeleton-line w-[240px]" />
+      </div>
+    </EmptyState>
+  );
+}
+
+function LoadErrorView({ description, onRetry }: { description: string; onRetry: () => void }) {
+  return (
+    <EmptyState
+      artClassName="bg-[#FEE2E2] text-red-600"
+      artIcon={AlertCircle}
+      buttonIcon={RefreshCw}
+      buttonLabel="重新读取"
+      description={description}
+      onButtonClick={onRetry}
+      title="角色读取失败"
+    />
   );
 }
 
@@ -650,6 +1645,7 @@ function InputFooter({
   inputValue,
   onInputChange,
   onSend,
+  sending,
 }: {
   disabled: boolean;
   disabledText: string;
@@ -657,6 +1653,7 @@ function InputFooter({
   inputValue: string;
   onInputChange: (value: string) => void;
   onSend: () => void;
+  sending: boolean;
 }) {
   return (
     <footer className="input-footer">
@@ -668,7 +1665,9 @@ function InputFooter({
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              onSend();
+              if (!sending) {
+                onSend();
+              }
             }
           }}
           placeholder={disabled ? disabledText : "输入问题，例如：这条项链怎么介绍？"}
@@ -677,13 +1676,13 @@ function InputFooter({
         />
         <Button
           aria-label="发送"
-          disabled={disabled}
+          disabled={disabled || sending}
           onClick={onSend}
           size="icon"
           title="发送"
           variant={focused || inputValue ? "primary" : "ghost"}
         >
-          <Send size={16} />
+          {sending ? <span className="spinner h-[15px] w-[15px]" /> : <Send size={16} />}
         </Button>
       </div>
     </footer>
@@ -697,13 +1696,14 @@ function StageRow({
 }: {
   index?: number;
   label: string;
-  state: "done" | "active" | "todo";
+  state: "done" | "active" | "todo" | "error";
 }) {
   return (
     <div className={cn("stage", state)}>
       <span className="stage-tick">
         {state === "done" && <Check size={13} strokeWidth={2.4} />}
         {state === "active" && <span className="spinner h-3 w-3 border-2" />}
+        {state === "error" && <AlertCircle size={13} strokeWidth={2.4} />}
         {state === "todo" && index}
       </span>
       <span className="stage-label">{label}</span>
@@ -747,10 +1747,12 @@ function AutoMessage({
   children,
   copyText,
   kind,
+  streaming,
 }: {
   children: React.ReactNode;
   copyText: () => void;
   kind: ScriptKind;
+  streaming?: boolean;
 }) {
   return (
     <div className="msg-row role">
@@ -769,7 +1771,10 @@ function AutoMessage({
             <Copy size={13} />
           </button>
         </div>
-        <div className="auto-body">{children}</div>
+        <div className="auto-body">
+          {children}
+          {streaming && <span className="caret" />}
+        </div>
       </div>
     </div>
   );
@@ -777,33 +1782,50 @@ function AutoMessage({
 
 function ModalHost({
   activeModal,
+  character,
   closeModal,
+  createCharacter,
   deleteCharacter,
-  startTraining,
+  onCalibrationSaved,
+  uploadMaterial,
 }: {
   activeModal: ModalKey | null;
+  character: Character;
   closeModal: () => void;
-  copyText: (text: string) => void;
+  createCharacter: (input: { category: Category; name: string }) => Promise<void>;
   deleteCharacter: () => void;
-  startTraining: () => void;
+  onCalibrationSaved: (savedExtraCount: number) => void;
+  uploadMaterial: (input: { characterId: string; filename: string; text: string }) => Promise<void>;
 }) {
   if (!activeModal) {
     return null;
   }
 
   if (activeModal === "styleSettings") {
-    return <StyleSettingsDrawer closeModal={closeModal} />;
+    return <StyleSettingsDrawer character={character} closeModal={closeModal} />;
   }
 
   if (activeModal === "upload") {
-    return <UploadModal closeModal={closeModal} />;
+    return <UploadModal character={character} closeModal={closeModal} uploadMaterial={uploadMaterial} />;
+  }
+
+  if (activeModal === "calibration") {
+    return (
+      <CalibrationModal
+        character={character}
+        closeModal={closeModal}
+        onSaved={onCalibrationSaved}
+      />
+    );
   }
 
   if (activeModal === "deleteConfirm") {
-    return <DeleteConfirmModal closeModal={closeModal} deleteCharacter={deleteCharacter} />;
+    return (
+      <DeleteConfirmModal character={character} closeModal={closeModal} deleteCharacter={deleteCharacter} />
+    );
   }
 
-  return <NewCharacterModal closeModal={closeModal} startTraining={startTraining} />;
+  return <NewCharacterModal closeModal={closeModal} createCharacter={createCharacter} />;
 }
 
 function CenterModal({
@@ -847,12 +1869,27 @@ function CenterModal({
 
 function NewCharacterModal({
   closeModal,
-  startTraining,
+  createCharacter,
 }: {
   closeModal: () => void;
-  startTraining: () => void;
+  createCharacter: (input: { category: Category; name: string }) => Promise<void>;
 }) {
   const [category, setCategory] = useState<Category>("jewel");
+  const [name, setName] = useState("珠宝主播·小雅");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function handleCreate() {
+    if (!name.trim() || submitting) {
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await createCharacter({ category, name: name.trim() });
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   return (
     <CenterModal
@@ -864,7 +1901,12 @@ function NewCharacterModal({
       <div className="modal-body">
         <div className="field">
           <label htmlFor="character-name">角色名称</label>
-          <input className="field-input" defaultValue="珠宝主播·小雅" id="character-name" />
+          <input
+            className="field-input"
+            id="character-name"
+            onChange={(event) => setName(event.target.value)}
+            value={name}
+          />
         </div>
         <div className="field">
           <label>类目</label>
@@ -896,8 +1938,8 @@ function NewCharacterModal({
         <Button onClick={closeModal} variant="ghost">
           取消
         </Button>
-        <Button onClick={startTraining}>
-          <Sparkles size={16} />
+        <Button disabled={submitting || !name.trim()} onClick={handleCreate}>
+          {submitting ? <span className="spinner h-[15px] w-[15px]" /> : <Sparkles size={16} />}
           创建并训练
         </Button>
       </div>
@@ -905,7 +1947,7 @@ function NewCharacterModal({
   );
 }
 
-function StyleSettingsDrawer({ closeModal }: { closeModal: () => void }) {
+function StyleSettingsDrawer({ character, closeModal }: { character: Character; closeModal: () => void }) {
   const [strength, setStrength] = useState(4);
   const [length, setLength] = useState("适中");
 
@@ -915,7 +1957,7 @@ function StyleSettingsDrawer({ closeModal }: { closeModal: () => void }) {
         <div className="drawer-head">
           <div>
             <h2 className="text-lg font-semibold leading-tight">风格设置</h2>
-            <p className="t-cap mt-1">珠宝主播·小雅</p>
+            <p className="t-cap mt-1">{character.name}</p>
           </div>
           <button aria-label="关闭" className="copy-fab static h-7 w-7" onClick={closeModal} type="button">
             <X size={15} />
@@ -978,53 +2020,349 @@ function StyleSettingsDrawer({ closeModal }: { closeModal: () => void }) {
   );
 }
 
-function UploadModal({ closeModal }: { closeModal: () => void }) {
+function CalibrationModal({
+  character,
+  closeModal,
+  onSaved,
+}: {
+  character: Character;
+  closeModal: () => void;
+  onSaved: (savedExtraCount: number) => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [extraExemplars, setExtraExemplars] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [sample, setSample] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [strength, setStrength] = useState(4);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSample() {
+      setError(null);
+      setLoading(true);
+      setSample("");
+
+      try {
+        const data = await requestCharacterCalibration(character.id, {
+          extraExemplars: "",
+          styleStrength: strength,
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        if (typeof data.sample !== "string" || !data.sample.trim()) {
+          throw new Error("校准样例为空");
+        }
+
+        setSample(data.sample);
+      } catch (loadError) {
+        if (cancelled) {
+          return;
+        }
+
+        console.error(
+          "[StyleClone][CalibrationModal][loadSample] failed",
+          { characterId: character.id, error: loadError },
+          new Date().toISOString(),
+        );
+        setError(loadError instanceof Error ? loadError.message : "生成校准样例失败");
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void loadSample();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [character.id]);
+
+  async function regenerateSample() {
+    if (loading || saving) {
+      return;
+    }
+
+    setError(null);
+    setLoading(true);
+
+    try {
+      const data = await requestCharacterCalibration(character.id, {
+        extraExemplars,
+        styleStrength: strength,
+      });
+
+      if (typeof data.sample !== "string" || !data.sample.trim()) {
+        throw new Error("校准样例为空");
+      }
+
+      setSample(data.sample);
+    } catch (regenerateError) {
+      console.error(
+        "[StyleClone][CalibrationModal][regenerateSample] failed",
+        { characterId: character.id, error: regenerateError },
+        new Date().toISOString(),
+      );
+      setError(regenerateError instanceof Error ? regenerateError.message : "重新生成失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveCalibration() {
+    if (loading || saving) {
+      return;
+    }
+
+    setError(null);
+    setSaving(true);
+
+    try {
+      const data = await requestCharacterCalibration(character.id, {
+        extraExemplars,
+        saveExtraExemplars: true,
+        saveOnly: true,
+        styleStrength: strength,
+      });
+
+      onSaved(data.savedExtraCount ?? 0);
+      closeModal();
+    } catch (saveError) {
+      console.error(
+        "[StyleClone][CalibrationModal][saveCalibration] failed",
+        { characterId: character.id, error: saveError },
+        new Date().toISOString(),
+      );
+      setError(saveError instanceof Error ? saveError.message : "保存校准失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <CenterModal
       closeModal={closeModal}
-      subtitle="为小雅补充更多直播稿，提升话术覆盖面"
+      subtitle={`${character.name} · 先看一段样例，再决定要不要补范本`}
+      title="风格校准"
+      width={620}
+    >
+      <div className="modal-body">
+        <div className="rounded-md border border-border bg-[#FCFDFE] px-4 py-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="t-cap">校准样例</span>
+            {loading && <span className="spinner h-[15px] w-[15px] text-primary" />}
+          </div>
+          <p className="mt-2 min-h-[112px] whitespace-pre-wrap text-sm leading-[1.8] text-text-1">
+            {sample || (loading ? "正在生成样例…" : "暂无样例")}
+          </p>
+        </div>
+
+        <div className="field">
+          <label htmlFor="calibration-strength">风格强度</label>
+          <div className="slider-shell">
+            <StyleStrengthSlider id="calibration-strength" onChange={setStrength} value={strength} />
+            <div className="mt-2.5 flex justify-between">
+              <span className="t-cap">更自由</span>
+              <span className="t-cap">更像原话</span>
+            </div>
+          </div>
+          <p className="t-cap text-text-3">当前 {strength}/5 · 调整后点重新生成查看效果</p>
+        </div>
+
+        <div className="field">
+          <label htmlFor="calibration-extra">补几条范本</label>
+          <textarea
+            className="field-textarea min-h-[92px]"
+            disabled={loading || saving}
+            id="calibration-extra"
+            onChange={(event) => setExtraExemplars(event.target.value)}
+            placeholder={"每行一条，例如：\n家人们先别划走，这个手感你上手就知道。"}
+            value={extraExemplars}
+          />
+          <p className="t-cap text-text-3">保存时会去重写入当前角色的通用范本</p>
+        </div>
+
+        {error && <p className="rounded-md bg-[#FEE2E2] px-3 py-2 text-[13px] text-red-600">{error}</p>}
+      </div>
+
+      <div className="modal-foot">
+        <Button disabled={loading || saving} onClick={closeModal} variant="ghost">
+          稍后再说
+        </Button>
+        <Button disabled={loading || saving} onClick={() => void regenerateSample()} variant="secondary">
+          {loading ? <span className="spinner h-[15px] w-[15px]" /> : <RefreshCw size={16} />}
+          重新生成
+        </Button>
+        <Button disabled={loading || saving} onClick={() => void saveCalibration()}>
+          {saving ? <span className="spinner h-[15px] w-[15px]" /> : <Check size={16} />}
+          满意保存
+        </Button>
+      </div>
+    </CenterModal>
+  );
+}
+
+function UploadModal({
+  character,
+  closeModal,
+  uploadMaterial,
+}: {
+  character: Character;
+  closeModal: () => void;
+  uploadMaterial: (input: { characterId: string; filename: string; text: string }) => Promise<void>;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [filename, setFilename] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [text, setText] = useState("");
+  const hasText = text.trim().length > 0;
+
+  async function readFile(file: File) {
+    setError(null);
+
+    if (!/\.(txt|md)$/i.test(file.name)) {
+      setError("仅支持 .txt / .md 文本素材");
+      return;
+    }
+
+    setFilename(file.name);
+    setText(await file.text());
+  }
+
+  async function handleUpload() {
+    if (!hasText || submitting) {
+      setError("请先选择文件，或粘贴一段直播稿文本");
+      return;
+    }
+
+    setSubmitting(true);
+    setError(null);
+
+    try {
+      await uploadMaterial({
+        characterId: character.id,
+        filename: filename || `${character.name}_直播稿.txt`,
+        text,
+      });
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "素材训练失败");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <CenterModal
+      closeModal={closeModal}
+      subtitle={`为${getCharacterNickname(character)}补充更多直播稿，提升话术覆盖面`}
       title="上传素材"
       width={520}
     >
       <div className="modal-body">
-        <div className="dropzone hover py-5">
+        <label
+          className={cn("dropzone block cursor-pointer py-5", (dragging || filename) && "hover")}
+          onDragLeave={() => setDragging(false)}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setDragging(true);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDragging(false);
+
+            const file = event.dataTransfer.files[0];
+
+            if (file) {
+              void readFile(file);
+            }
+          }}
+        >
           <div className="dropzone-icon bg-white">
             <FileText size={19} />
           </div>
-          <div className="text-[13px] font-medium text-primary">松手即可上传</div>
-          <div className="t-cap mt-1">珠宝主播直播稿_0605.txt</div>
+          <div className="text-[13px] font-medium text-primary">
+            {dragging ? "松手即可上传" : filename ? "已选择素材" : "拖入文件，或 选择文件"}
+          </div>
+          <div className="t-cap mt-1">{filename || "支持 .txt / .md · 也可直接粘贴文本"}</div>
+          <input
+            accept=".txt,.md,text/plain,text/markdown"
+            className="sr-only"
+            disabled={submitting}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+
+              if (file) {
+                void readFile(file);
+              }
+            }}
+            type="file"
+          />
+        </label>
+
+        <div className="field">
+          <label htmlFor="material-text">粘贴文本</label>
+          <textarea
+            className="field-textarea min-h-[120px]"
+            disabled={submitting}
+            id="material-text"
+            onChange={(event) => {
+              setText(event.target.value);
+
+              if (!filename && event.target.value.trim()) {
+                setFilename(`${character.name}_粘贴素材.txt`);
+              }
+            }}
+            placeholder="把直播稿文本粘贴到这里..."
+            value={text}
+          />
         </div>
 
-        <div className="flex items-center gap-3 rounded-md border border-border px-3.5 py-2.5">
-          <FileText className="text-primary" size={18} />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[13px] font-medium">珠宝主播直播稿_0605.txt</div>
-            <div className="t-cap">3.8 万字 · 解析中</div>
+        {hasText && (
+          <div className="flex items-center gap-3 rounded-md border border-border px-3.5 py-2.5">
+            <FileText className="text-primary" size={18} />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[13px] font-medium">{filename || "粘贴素材.txt"}</div>
+              <div className="t-cap">{text.replace(/\s+/g, "").length.toLocaleString()} 字 · 待训练</div>
+            </div>
+            {submitting && <span className="spinner text-primary" />}
           </div>
-          <span className="spinner text-primary" />
-        </div>
+        )}
 
         <div className="stage-list rounded-md border border-border px-3.5 py-1">
-          <StageRow label="切片" state="done" />
-          <StageRow label="向量化" state="active" />
+          <StageRow index={1} label="切片" state={hasText ? "done" : "todo"} />
+          <StageRow index={2} label="向量化" state={submitting ? "active" : "todo"} />
           <StageRow index={3} label="抽风格" state="todo" />
           <StageRow index={4} label="抽范本" state="todo" />
         </div>
+
+        {error && <p className="rounded-md bg-[#FEE2E2] px-3 py-2 text-[13px] text-red-600">{error}</p>}
       </div>
       <div className="modal-foot">
-        <Button onClick={closeModal} variant="ghost">
+        <Button disabled={submitting} onClick={closeModal} variant="ghost">
           取消
         </Button>
-        <Button disabled>解析中…</Button>
+        <Button disabled={!hasText || submitting} onClick={handleUpload}>
+          {submitting ? <span className="spinner h-[15px] w-[15px]" /> : <Upload size={16} />}
+          {submitting ? "训练中…" : "开始训练"}
+        </Button>
       </div>
     </CenterModal>
   );
 }
 
 function DeleteConfirmModal({
+  character,
   closeModal,
   deleteCharacter,
 }: {
+  character: Character;
   closeModal: () => void;
   deleteCharacter: () => void;
 }) {
@@ -1043,7 +2381,7 @@ function DeleteConfirmModal({
               <AlertCircle size={19} />
             </div>
             <div>
-              <h2 className="text-[17px] font-semibold leading-tight">删除角色「珠宝主播·小雅」？</h2>
+              <h2 className="text-[17px] font-semibold leading-tight">删除角色「{character.name}」？</h2>
               <p className="mt-2 text-sm leading-[1.7] text-text-2">
                 删除后该角色的训练结果与全部对话记录将一并清除，且无法恢复。
               </p>
@@ -1089,9 +2427,11 @@ function Segmented<T extends string>({
 }
 
 function StyleStrengthSlider({
+  id = "style-strength",
   onChange,
   value,
 }: {
+  id?: string;
   onChange: (value: number) => void;
   value: number;
 }) {
@@ -1108,7 +2448,7 @@ function StyleStrengthSlider({
       aria-valuemin={1}
       aria-valuenow={value}
       className="slider-visual"
-      id="style-strength"
+      id={id}
       onClick={(event) => commitFromPoint(event.clientX, event.currentTarget.getBoundingClientRect())}
       onKeyDown={(event) => {
         if (event.key === "ArrowLeft") {
