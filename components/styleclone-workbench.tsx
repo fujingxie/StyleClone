@@ -393,6 +393,8 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
 
   useEffect(() => {
     void refreshCharacters({ showLoading: true });
+    // Initial character loading should run once when the workbench mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -437,6 +439,8 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
     return () => {
       cancelled = true;
     };
+    // History should reload when the selected character changes, not on every helper identity change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [characters.length, isCharactersLoading, selectedCharacter.id]);
 
   useEffect(() => {
@@ -503,6 +507,8 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
       cancelled = true;
       window.clearInterval(timer);
     };
+    // The polling window is controlled by selected character/status and workspace state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeModal, isCharactersLoading, selectedCharacter.id, selectedCharacter.status, workspaceState]);
 
   function writeUrl(nextState: WorkspaceState, nextModal: ModalKey | null) {
@@ -2783,6 +2789,8 @@ function CalibrationModal({
     return () => {
       cancelled = true;
     };
+    // Initial sample loads per character; strength changes require explicit regeneration.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [character.id]);
 
   async function regenerateSample() {

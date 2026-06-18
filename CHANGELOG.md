@@ -1,5 +1,23 @@
 # CHANGELOG.md
 
+## 2026-06-18 · T13 Lint 配置固化
+
+- 新增 `.eslintrc.json`：
+  - 使用 `next/core-web-vitals` 作为项目 ESLint 基线。
+  - `npm run lint` 不再进入 Next.js 首次配置交互。
+- 清理 lint warning：
+  - 为初始角色加载、历史加载、训练轮询、校准样例初始生成这 4 处有意控制触发时机的 `useEffect` 添加局部 `react-hooks/exhaustive-deps` 说明。
+
+关键决策：
+
+- 不全局关闭 `react-hooks/exhaustive-deps`；只在行为上需要固定触发时机的位置局部说明。
+- 不为消除 lint warning 改变校准滑块行为；风格强度变化仍需用户显式点击「重新生成」。
+
+验证：
+
+- `npm run lint` 通过，且无 warning/error。
+- `npm run build` 通过。
+
 ## 2026-06-18 · T12 多会话管理
 
 - 扩展会话服务：

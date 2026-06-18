@@ -97,6 +97,10 @@ Last updated: 2026-06-18
   - chat API 支持传入 `conversationId`，可向选中问答会话追加消息。
   - auto/start 支持复用选中的空 auto 会话；非空会话仍按新一轮自动生成创建新会话。
   - 前端历史抽屉支持 chat/auto 分段、空态、新建、改名、删除、切换会话和 URL `modal=history`。
+- 已实现 T13 Lint 配置固化：
+  - 新增 `.eslintrc.json`，`npm run lint` 不再进入 Next.js 首次配置交互。
+  - 为 4 处有意控制触发时机的 `useEffect` 添加局部 `react-hooks/exhaustive-deps` 说明。
+  - `npm run lint` 当前通过且无 warning/error。
 
 ## 进行中 / 待处理项
 
@@ -107,7 +111,6 @@ Last updated: 2026-06-18
 
 - 项目当前只有本地 UI primitives，未通过 `shadcn/ui` CLI 生成完整组件集。
 - 窄屏已做收缩以避免裁切，但产品仍按桌面工具优先设计。
-- `npm run lint` 当前会进入 Next.js 首次 ESLint 配置交互，项目尚未固化 `.eslintrc`；`npm run build` 可完成编译、类型检查和页面生成。
 - 当前环境下 `prisma db push` 的 schema engine 返回裸错误；已改用 `scripts/init-db.mjs` 创建 SQLite 表，再用 Prisma Client seed。后续若固定 Node LTS，可复测 Prisma CLI 推库。
 - T3/T5 暂用 `Chunk.embeddingJson` 在 SQLite 中保存向量并做本地 cosine 检索，未引入 LanceDB native 依赖；如后续角色/素材规模明显变大，再迁到 LanceDB。
 
@@ -129,3 +132,4 @@ Last updated: 2026-06-18
 - T11 自动生成每次启动创建新的 auto 会话；读取历史时跳过空会话，避免用户立即停止后覆盖上一轮有效台词。
 - T12 会话列表保留空会话，但默认历史读取仍跳过空会话：新建空会话可作为下一次写入目标，同时刷新页面不会被空会话覆盖有效历史。
 - T12 自动生成只在选中的 auto 会话为空时复用该会话；如果当前会话已有内容，启动自动化仍创建新一轮，避免把两轮台词混在一起。
+- T13 采用 `next/core-web-vitals` 作为 ESLint 基线，局部保留有业务意图的 effect 触发时机，不为消除 lint warning 改变用户可见行为。
