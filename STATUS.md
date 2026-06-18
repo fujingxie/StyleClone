@@ -31,7 +31,7 @@ Last updated: 2026-06-18
   - URL query 弹窗预览：`modal=newCharacter|styleSettings|upload|deleteConfirm|calibration|history`。
   - 开始/停止自动化状态切换、新建角色弹窗、复制 toast、typing caret、自动化脉冲点。
   - 左栏角色列表从 API 读取；新建角色写入 SQLite；删除确认调用 API 删除。
-  - 上传素材弹窗支持 .txt/.md 选择、拖拽、粘贴文本；提交后调用 Voyage 向量化并写入 `Chunk`。
+  - 新建角色弹窗和上传素材弹窗支持 .txt/.md 选择、拖拽、粘贴文本；提交后调用 Voyage 向量化并写入 `Chunk`。
   - 训练完成后自动打开风格校准弹窗，可查看样例、调节风格强度、补充范本并重新生成。
   - 初始角色读取有加载骨架和失败重试态。
   - Toast 支持 success/info/error 三种状态。

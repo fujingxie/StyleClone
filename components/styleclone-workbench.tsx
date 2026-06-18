@@ -44,6 +44,22 @@ type Character = {
   soon?: boolean;
 };
 
+type CharacterMaterialDraft = {
+  filename: string;
+  text: string;
+};
+
+type CreateCharacterInput = {
+  category: Category;
+  material?: CharacterMaterialDraft;
+  name: string;
+};
+
+type UploadMaterialInput = CharacterMaterialDraft & {
+  characterId: string;
+  modalDuringTraining?: ModalKey | null;
+};
+
 type ChatMessage = {
   id: string;
   role: ChatRole;
@@ -786,10 +802,12 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
     }
   }
 
-  async function createCharacter(input: { category: Category; name: string }) {
+  async function createCharacter(input: CreateCharacterInput) {
+    let createdCharacter: Character | null = null;
+
     try {
       const response = await fetch("/api/characters", {
-        body: JSON.stringify({ ...input, status: "training", type: "主播" }),
+        body: JSON.stringify({ category: input.category, name: input.name, status: "training", type: "主播" }),
         headers: { "Content-Type": "application/json" },
         method: "POST",
       });
@@ -799,23 +817,43 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
       }
 
       const data = (await response.json()) as { character: Character };
+      createdCharacter = data.character;
       setCharacters((current) => [...current, data.character]);
       setSelectedCharacterId(data.character.id);
+
+      if (input.material) {
+        setActiveModal(null);
+        setWorkspaceState("training");
+        writeUrl("training", null);
+        await uploadMaterial({
+          characterId: data.character.id,
+          filename: input.material.filename,
+          modalDuringTraining: null,
+          text: input.material.text,
+        });
+        return;
+      }
+
       setActiveModal("upload");
       setWorkspaceState("training");
       writeUrl("training", "upload");
     } catch (error) {
       console.error("[StyleClone][createCharacter] failed", { error, input }, new Date().toISOString());
-      showToast("创建角色失败", "error");
+
+      if (!createdCharacter) {
+        showToast("创建角色失败", "error");
+      }
     }
   }
 
-  async function uploadMaterial(input: { characterId: string; filename: string; text: string }) {
+  async function uploadMaterial(input: UploadMaterialInput) {
     try {
       const wordCount = input.text.replace(/\s+/g, "").length;
+      const modalDuringTraining =
+        input.modalDuringTraining === undefined ? activeModal ?? "upload" : input.modalDuringTraining;
 
       setWorkspaceState("training");
-      writeUrl("training", activeModal ?? "upload");
+      writeUrl("training", modalDuringTraining);
       setCharacters((current) =>
         current.map((character) =>
           character.id === input.characterId ? { ...character, status: "training" } : character,
@@ -2230,7 +2268,7 @@ function ModalHost({
   character: Character;
   chatConversations: ConversationSummary[];
   closeModal: () => void;
-  createCharacter: (input: { category: Category; name: string }) => Promise<void>;
+  createCharacter: (input: CreateCharacterInput) => Promise<void>;
   deleteCharacter: () => void;
   historyMode: ConversationMode;
   onCalibrationSaved: (savedExtraCount: number) => void;
@@ -2241,7 +2279,7 @@ function ModalHost({
   onSelectConversation: (mode: ConversationMode, conversationId: string) => void;
   selectedAutoConversationId: string | null;
   selectedChatConversationId: string | null;
-  uploadMaterial: (input: { characterId: string; filename: string; text: string }) => Promise<void>;
+  uploadMaterial: (input: UploadMaterialInput) => Promise<void>;
 }) {
   if (!activeModal) {
     return null;
@@ -2337,11 +2375,27 @@ function NewCharacterModal({
   createCharacter,
 }: {
   closeModal: () => void;
-  createCharacter: (input: { category: Category; name: string }) => Promise<void>;
+  createCharacter: (input: CreateCharacterInput) => Promise<void>;
 }) {
   const [category, setCategory] = useState<Category>("jewel");
+  const [dragging, setDragging] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [filename, setFilename] = useState("");
   const [name, setName] = useState("珠宝主播·小雅");
   const [submitting, setSubmitting] = useState(false);
+  const [text, setText] = useState("");
+
+  async function readFile(file: File) {
+    setError(null);
+
+    if (!/\.(txt|md)$/i.test(file.name)) {
+      setError("仅支持 .txt / .md 文本素材");
+      return;
+    }
+
+    setFilename(file.name);
+    setText(await file.text());
+  }
 
   async function handleCreate() {
     if (!name.trim() || submitting) {
@@ -2350,7 +2404,18 @@ function NewCharacterModal({
 
     setSubmitting(true);
     try {
-      await createCharacter({ category, name: name.trim() });
+      const materialText = text.trim();
+
+      await createCharacter({
+        category,
+        material: materialText
+          ? {
+              filename: filename || `${name.trim()}_粘贴素材.txt`,
+              text: materialText,
+            }
+          : undefined,
+        name: name.trim(),
+      });
     } finally {
       setSubmitting(false);
     }
@@ -2388,19 +2453,80 @@ function NewCharacterModal({
         </div>
         <div className="field">
           <label>直播稿素材</label>
-          <div className="dropzone py-[22px]">
+          <label
+            className={cn("dropzone block cursor-pointer py-[22px]", (dragging || filename) && "hover")}
+            onDragLeave={() => setDragging(false)}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDragging(false);
+
+              const file = event.dataTransfer.files[0];
+
+              if (file) {
+                void readFile(file);
+              }
+            }}
+          >
             <div className="dropzone-icon">
               <Upload size={19} />
             </div>
             <div className="text-[13px] font-medium">
-              拖入文件，或 <span className="text-primary">选择文件</span>
+              {dragging ? (
+                "松手即可上传"
+              ) : filename ? (
+                "已选择素材"
+              ) : (
+                <>
+                  拖入文件，或 <span className="text-primary">选择文件</span>
+                </>
+              )}
             </div>
-            <div className="t-cap mt-1">支持 .txt / .md · 也可直接粘贴文本</div>
-          </div>
+            <div className="t-cap mt-1">{filename || "支持 .txt / .md · 也可直接粘贴文本"}</div>
+            <input
+              accept=".txt,.md,text/plain,text/markdown"
+              className="sr-only"
+              disabled={submitting}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+
+                if (file) {
+                  void readFile(file);
+                }
+              }}
+              type="file"
+            />
+          </label>
         </div>
+
+        <div className="field">
+          <label htmlFor="new-character-material-text">粘贴文本</label>
+          <textarea
+            className="field-textarea min-h-[82px]"
+            disabled={submitting}
+            id="new-character-material-text"
+            onChange={(event) => {
+              setText(event.target.value);
+
+              if (!filename && event.target.value.trim()) {
+                setFilename(`${name.trim() || "新角色"}_粘贴素材.txt`);
+              }
+            }}
+            placeholder="把直播稿文本粘贴到这里，或先选择 .txt / .md 文件"
+            value={text}
+          />
+          {text.trim() && (
+            <p className="t-cap text-text-3">{text.replace(/\s+/g, "").length.toLocaleString()} 字 · 待训练</p>
+          )}
+        </div>
+
+        {error && <p className="rounded-md bg-[#FEE2E2] px-3 py-2 text-[13px] text-red-600">{error}</p>}
       </div>
       <div className="modal-foot">
-        <Button onClick={closeModal} variant="ghost">
+        <Button disabled={submitting} onClick={closeModal} variant="ghost">
           取消
         </Button>
         <Button disabled={submitting || !name.trim()} onClick={handleCreate}>
@@ -2924,7 +3050,7 @@ function UploadModal({
 }: {
   character: Character;
   closeModal: () => void;
-  uploadMaterial: (input: { characterId: string; filename: string; text: string }) => Promise<void>;
+  uploadMaterial: (input: UploadMaterialInput) => Promise<void>;
 }) {
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
