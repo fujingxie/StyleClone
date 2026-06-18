@@ -94,6 +94,35 @@ CREATE TABLE IF NOT EXISTS "Exemplar" (
 
 CREATE INDEX IF NOT EXISTS "Exemplar_characterId_kind_idx" ON "Exemplar"("characterId", "kind");
 CREATE INDEX IF NOT EXISTS "Exemplar_sourceMaterialId_idx" ON "Exemplar"("sourceMaterialId");
+
+CREATE TABLE IF NOT EXISTS "Conversation" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "characterId" TEXT NOT NULL,
+  "mode" TEXT NOT NULL,
+  "title" TEXT,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "Conversation_characterId_fkey" FOREIGN KEY ("characterId") REFERENCES "Character" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "Conversation_characterId_updatedAt_idx" ON "Conversation"("characterId", "updatedAt");
+CREATE INDEX IF NOT EXISTS "Conversation_characterId_mode_idx" ON "Conversation"("characterId", "mode");
+
+CREATE TABLE IF NOT EXISTS "Message" (
+  "id" TEXT NOT NULL PRIMARY KEY,
+  "conversationId" TEXT NOT NULL,
+  "characterId" TEXT NOT NULL,
+  "role" TEXT NOT NULL,
+  "kind" TEXT,
+  "content" TEXT NOT NULL,
+  "sequence" INTEGER NOT NULL DEFAULT 0,
+  "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "Message_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "Conversation" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT "Message_characterId_fkey" FOREIGN KEY ("characterId") REFERENCES "Character" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "Message_conversationId_sequence_idx" ON "Message"("conversationId", "sequence");
+CREATE INDEX IF NOT EXISTS "Message_characterId_createdAt_idx" ON "Message"("characterId", "createdAt");
 `;
 
 runSql(schema);

@@ -1,5 +1,74 @@
 # CHANGELOG.md
 
+## 2026-06-18 · T12 多会话管理
+
+- 扩展会话服务：
+  - `lib/conversations.ts` 增加会话列表、指定会话读取、重命名、删除能力。
+  - 最近历史读取继续跳过空会话，避免空记录覆盖有效历史。
+- 新增会话管理 API：
+  - `app/api/characters/[id]/conversations/route.ts`
+  - `app/api/characters/[id]/conversations/[conversationId]/route.ts`
+  - GET 列表返回最近消息预览、消息数、创建/更新时间。
+  - POST 新建 chat/auto 空会话。
+  - PATCH 重命名会话。
+  - DELETE 删除会话及其消息。
+- 更新历史读取与生成 API：
+  - `/api/characters/:id/messages` 支持 `conversationId` 查询指定会话。
+  - chat API 支持传入 `conversationId` 并向指定问答会话追加消息。
+  - auto/start 支持复用选中的空 auto 会话；非空会话仍创建新的自动生成轮次。
+- 更新前端工作台：
+  - Header ready 状态增加「历史」入口。
+  - 新增历史会话抽屉，支持 chat/auto 分段、空态、新建、改名、删除、切换会话。
+  - `modal=history` 可直接打开历史抽屉。
+  - 生成完成后刷新会话列表，让新消息预览和消息数保持同步。
+
+关键决策：
+
+- 会话列表展示空会话，方便用户先新建再写入；默认最近历史仍跳过空会话，避免刷新后被空会话抢占。
+- 自动台词只复用选中的空 auto 会话；已有消息的 auto 会话不继续追加新一轮，避免混淆导出内容。
+- T12 只做本地多会话管理，不新增搜索、分页游标或跨角色聚合历史。
+
+验证：
+
+- `npm run build` 通过。
+- `git diff --check` 通过。
+- `npm run lint` 已尝试；项目尚未配置 ESLint，Next.js 进入首次配置交互，未执行实际 lint。
+- 浏览器冒烟通过：`http://127.0.0.1:3001/?state=ready` 加载成功，Header「历史」可见，历史抽屉可打开，问答/自动台词空态和新建入口可见，切换分段正常。
+- dev server 日志确认 `/api/characters` 与 `/api/characters/demo-jewel/conversations?mode=chat|auto&limit=40` 返回 200。
+- 可回滚 create/rename/delete HTTP 冒烟因本机权限额度限制未执行完成。
+
+## 2026-06-17 · T11 消息与会话持久化
+
+- 扩展数据层：
+  - 新增 Prisma 模型 `Conversation` / `Message`。
+  - 更新 `scripts/init-db.mjs`，SQLite 初始化会创建会话表、消息表和索引。
+  - 新增 `lib/conversations.ts`，封装最近会话、创建会话、追加消息、读取历史。
+- 新增历史读取 API：
+  - `app/api/characters/[id]/messages/route.ts`
+  - GET `?mode=chat|auto&limit=...` 返回当前角色最近一组会话和消息。
+- 更新生成 API：
+  - chat API 在生成前保存用户消息，在生成完成后保存 assistant 回复。
+  - auto/start API 每次启动创建新的 auto 会话，并在每段完成后保存台词和 kind。
+  - SSE 事件补充返回 `conversationId` / `messageId`，为后续前端对齐 DB id 预留。
+- 更新前端工作台：
+  - 刷新或切换角色时加载最近 chat/auto 历史。
+  - `state=chat` 会展示最近问答历史；`state=auto` 会展示最近自动台词。
+  - 复制/下载沿用当前已加载消息，因此刷新后仍能导出历史内容。
+
+关键决策：
+
+- T11 先实现每个角色最近一组 chat/auto 会话，不做多会话列表、重命名、删除等管理 UI。
+- chat 复用最近 chat 会话持续追加；auto 每次启动创建新会话，更符合“重新生成一轮台词”的使用心智。
+- 读取 auto 历史时跳过空会话，避免用户启动后立刻停止导致上一轮有效台词被空会话覆盖。
+
+验证：
+
+- `npm run db:init` 通过，并生成新的 Prisma Client。
+- `npm run build` 通过。
+- `git diff --check` 通过。
+- Prisma 烟测通过：创建临时角色 → 写入 chat 会话 2 条消息和 auto 会话 1 条消息 → 按序读取 → 删除角色后 `Conversation/Message` 级联清理为 0。
+- 当前沙箱禁止监听临时端口，`next start --port 3102` 返回 `listen EPERM`；未做 HTTP route 级别烟测。
+
 ## 2026-06-17 · T10 状态与窄屏打磨
 
 - 更新训练状态：

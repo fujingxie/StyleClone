@@ -8,11 +8,13 @@ import {
   Download,
   FileText,
   Menu,
+  Pencil,
   Plus,
   RefreshCw,
   Send,
   Settings,
   Sparkles,
+  Trash2,
   Upload,
   X,
   type LucideIcon,
@@ -22,7 +24,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 export type WorkspaceState = "empty" | "training" | "ready" | "chat" | "auto" | "error";
-export type ModalKey = "newCharacter" | "styleSettings" | "upload" | "deleteConfirm" | "calibration";
+export type ModalKey = "newCharacter" | "styleSettings" | "upload" | "deleteConfirm" | "calibration" | "history";
 
 type Category = "jewel" | "fresh" | "group" | "other";
 type ScriptKind = "open" | "sell" | "inter" | "obj" | "close";
@@ -93,6 +95,49 @@ type CalibrationRequestPayload = {
   styleStrength: number;
 };
 
+type ConversationMode = "chat" | "auto";
+
+type MessageHistoryItem = {
+  content: string;
+  createdAt: string;
+  id: string;
+  kind: string | null;
+  role: "user" | "assistant" | "auto";
+  sequence: number;
+};
+
+type MessageHistoryResponse = {
+  conversation: {
+    createdAt: string;
+    id: string;
+    mode: ConversationMode;
+    title: string | null;
+    updatedAt: string;
+  } | null;
+  error?: string;
+  messages: MessageHistoryItem[];
+};
+
+type ConversationSummary = {
+  createdAt: string;
+  id: string;
+  latestMessagePreview: string | null;
+  messageCount: number;
+  mode: ConversationMode;
+  title: string | null;
+  updatedAt: string;
+};
+
+type ConversationListResponse = {
+  conversations: ConversationSummary[];
+  error?: string;
+};
+
+type ConversationMutationResponse = {
+  conversation: ConversationSummary;
+  error?: string;
+};
+
 async function requestCharacterCalibration(characterId: string, payload: CalibrationRequestPayload) {
   const response = await fetch(`/api/characters/${encodeURIComponent(characterId)}/calibrate`, {
     body: JSON.stringify(payload),
@@ -106,6 +151,86 @@ async function requestCharacterCalibration(characterId: string, payload: Calibra
   }
 
   return data ?? {};
+}
+
+async function requestMessageHistory(characterId: string, mode: ConversationMode, conversationId?: string | null) {
+  const params = new URLSearchParams({
+    limit: "120",
+    mode,
+  });
+
+  if (conversationId) {
+    params.set("conversationId", conversationId);
+  }
+
+  const response = await fetch(
+    `/api/characters/${encodeURIComponent(characterId)}/messages?${params.toString()}`,
+  );
+  const data = (await response.json().catch(() => null)) as MessageHistoryResponse | null;
+
+  if (!response.ok) {
+    throw new Error(data?.error ?? `GET /api/characters/${characterId}/messages ${response.status}`);
+  }
+
+  return data ?? { conversation: null, messages: [] };
+}
+
+async function requestConversations(characterId: string, mode: ConversationMode) {
+  const response = await fetch(
+    `/api/characters/${encodeURIComponent(characterId)}/conversations?mode=${mode}&limit=40`,
+  );
+  const data = (await response.json().catch(() => null)) as ConversationListResponse | null;
+
+  if (!response.ok) {
+    throw new Error(data?.error ?? `GET /api/characters/${characterId}/conversations ${response.status}`);
+  }
+
+  return data?.conversations ?? [];
+}
+
+async function requestCreateConversation(characterId: string, mode: ConversationMode) {
+  const response = await fetch(`/api/characters/${encodeURIComponent(characterId)}/conversations`, {
+    body: JSON.stringify({ mode }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+  const data = (await response.json().catch(() => null)) as ConversationMutationResponse | null;
+
+  if (!response.ok || !data?.conversation) {
+    throw new Error(data?.error ?? `POST /api/characters/${characterId}/conversations ${response.status}`);
+  }
+
+  return data.conversation;
+}
+
+async function requestRenameConversation(characterId: string, conversationId: string, title: string) {
+  const response = await fetch(
+    `/api/characters/${encodeURIComponent(characterId)}/conversations/${encodeURIComponent(conversationId)}`,
+    {
+      body: JSON.stringify({ title }),
+      headers: { "Content-Type": "application/json" },
+      method: "PATCH",
+    },
+  );
+  const data = (await response.json().catch(() => null)) as ConversationMutationResponse | null;
+
+  if (!response.ok || !data?.conversation) {
+    throw new Error(data?.error ?? `PATCH conversation ${response.status}`);
+  }
+
+  return data.conversation;
+}
+
+async function requestDeleteConversation(characterId: string, conversationId: string) {
+  const response = await fetch(
+    `/api/characters/${encodeURIComponent(characterId)}/conversations/${encodeURIComponent(conversationId)}`,
+    { method: "DELETE" },
+  );
+  const data = (await response.json().catch(() => null)) as { error?: string } | null;
+
+  if (!response.ok) {
+    throw new Error(data?.error ?? `DELETE conversation ${response.status}`);
+  }
 }
 
 type StyleCloneWorkbenchProps = {
@@ -149,6 +274,34 @@ const kindMeta: Record<ScriptKind, { label: string; className: string }> = {
   obj: { label: "异议", className: "kind-obj" },
   close: { label: "逼单", className: "kind-close" },
 };
+
+function isScriptKind(value: string | null): value is ScriptKind {
+  return Boolean(value && value in kindMeta);
+}
+
+function isChatHistoryMessage(message: MessageHistoryItem): message is MessageHistoryItem & { role: ChatRole } {
+  return message.role === "user" || message.role === "assistant";
+}
+
+function mapHistoryToChatMessages(messages: MessageHistoryItem[]): ChatMessage[] {
+  return messages
+    .filter(isChatHistoryMessage)
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      text: message.content,
+    }));
+}
+
+function mapHistoryToAutoMessages(messages: MessageHistoryItem[]): AutoScriptMessage[] {
+  return messages
+    .filter((message) => message.role === "auto")
+    .map((message) => ({
+      id: message.id,
+      kind: isScriptKind(message.kind) ? message.kind : "sell",
+      text: message.content,
+    }));
+}
 
 const autoScripts: Array<{ kind: ScriptKind; text: string }> = [
   {
@@ -217,15 +370,20 @@ function createExportFilename(character: Character, mode: "auto" | "chat") {
 export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWorkbenchProps) {
   const [workspaceState, setWorkspaceState] = useState<WorkspaceState>(initialState);
   const [activeModal, setActiveModal] = useState<ModalKey | null>(initialModal);
+  const [autoConversations, setAutoConversations] = useState<ConversationSummary[]>([]);
   const [characters, setCharacters] = useState<Character[]>([]);
   const autoAbortController = useRef<AbortController | null>(null);
   const [autoMessages, setAutoMessages] = useState<AutoScriptMessage[]>([]);
   const [characterLoadError, setCharacterLoadError] = useState<string | null>(null);
+  const [chatConversations, setChatConversations] = useState<ConversationSummary[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [historyMode, setHistoryMode] = useState<ConversationMode>("chat");
   const [isAnswering, setIsAnswering] = useState(false);
   const [isAutoGenerating, setIsAutoGenerating] = useState(false);
   const [isCharactersLoading, setIsCharactersLoading] = useState(true);
   const [isRailOpen, setIsRailOpen] = useState(false);
+  const [selectedAutoConversationId, setSelectedAutoConversationId] = useState<string | null>(null);
+  const [selectedChatConversationId, setSelectedChatConversationId] = useState<string | null>(null);
   const [selectedCharacterId, setSelectedCharacterId] = useState(fallbackCharacter.id);
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatusSnapshot | null>(null);
   const [inputValue, setInputValue] = useState("");
@@ -246,6 +404,40 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
   useEffect(() => {
     setTrainingStatus(null);
   }, [selectedCharacterId]);
+
+  useEffect(() => {
+    if (isCharactersLoading || characters.length === 0) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function loadHistory() {
+      try {
+        await loadConversationState(selectedCharacter.id);
+        if (cancelled) {
+          return;
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        console.error(
+          "[StyleClone][loadMessageHistory] failed",
+          { characterId: selectedCharacter.id, error },
+          new Date().toISOString(),
+        );
+        showToast("读取历史消息失败", "error");
+      }
+    }
+
+    void loadHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [characters.length, isCharactersLoading, selectedCharacter.id]);
 
   useEffect(() => {
     if (!toast) {
@@ -399,6 +591,192 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
       if (options.showLoading) {
         setIsCharactersLoading(false);
       }
+    }
+  }
+
+  async function refreshConversationLists(characterId = selectedCharacter.id) {
+    const [chatList, autoList] = await Promise.all([
+      requestConversations(characterId, "chat"),
+      requestConversations(characterId, "auto"),
+    ]);
+
+    setChatConversations(chatList);
+    setAutoConversations(autoList);
+    setSelectedChatConversationId((current) =>
+      current && chatList.some((conversation) => conversation.id === current) ? current : chatList[0]?.id ?? null,
+    );
+    setSelectedAutoConversationId((current) =>
+      current && autoList.some((conversation) => conversation.id === current) ? current : autoList[0]?.id ?? null,
+    );
+
+    return { autoList, chatList };
+  }
+
+  async function loadConversationMessages(mode: ConversationMode, conversationId: string | null) {
+    if (!conversationId) {
+      if (mode === "chat") {
+        setChatMessages([]);
+      } else {
+        setAutoMessages([]);
+      }
+      return [];
+    }
+
+    const history = await requestMessageHistory(selectedCharacter.id, mode, conversationId);
+
+    if (mode === "chat") {
+      setChatMessages(mapHistoryToChatMessages(history.messages));
+    } else {
+      setAutoMessages(mapHistoryToAutoMessages(history.messages));
+    }
+
+    return history.messages;
+  }
+
+  async function loadConversationState(characterId = selectedCharacter.id) {
+    const { autoList, chatList } = await refreshConversationLists(characterId);
+    const chatId = chatList[0]?.id ?? null;
+    const autoId = autoList[0]?.id ?? null;
+    const [chatHistory, autoHistory] = await Promise.all([
+      chatId ? requestMessageHistory(characterId, "chat", chatId) : Promise.resolve({ conversation: null, messages: [] }),
+      autoId ? requestMessageHistory(characterId, "auto", autoId) : Promise.resolve({ conversation: null, messages: [] }),
+    ]);
+
+    setSelectedChatConversationId(chatId);
+    setSelectedAutoConversationId(autoId);
+
+    if (!isAnswering) {
+      setChatMessages(mapHistoryToChatMessages(chatHistory.messages));
+    }
+
+    if (!isAutoGenerating) {
+      setAutoMessages(mapHistoryToAutoMessages(autoHistory.messages));
+    }
+  }
+
+  async function selectConversation(mode: ConversationMode, conversationId: string) {
+    try {
+      const messages = await requestMessageHistory(selectedCharacter.id, mode, conversationId);
+
+      if (mode === "chat") {
+        setSelectedChatConversationId(conversationId);
+        setChatMessages(mapHistoryToChatMessages(messages.messages));
+        setWorkspaceState(messages.messages.length > 0 ? "chat" : "ready");
+        writeUrl(messages.messages.length > 0 ? "chat" : "ready", null);
+      } else {
+        setSelectedAutoConversationId(conversationId);
+        setAutoMessages(mapHistoryToAutoMessages(messages.messages));
+        setWorkspaceState(messages.messages.length > 0 ? "auto" : "ready");
+        writeUrl(messages.messages.length > 0 ? "auto" : "ready", null);
+      }
+
+      setActiveModal(null);
+    } catch (error) {
+      console.error(
+        "[StyleClone][selectConversation] failed",
+        { characterId: selectedCharacter.id, conversationId, error, mode },
+        new Date().toISOString(),
+      );
+      showToast("切换会话失败", "error");
+    }
+  }
+
+  async function createNewConversation(mode: ConversationMode) {
+    try {
+      const conversation = await requestCreateConversation(selectedCharacter.id, mode);
+
+      if (mode === "chat") {
+        setChatConversations((current) => [conversation, ...current]);
+        setSelectedChatConversationId(conversation.id);
+        setChatMessages([]);
+      } else {
+        setAutoConversations((current) => [conversation, ...current]);
+        setSelectedAutoConversationId(conversation.id);
+        setAutoMessages([]);
+      }
+
+      setWorkspaceState("ready");
+      writeUrl("ready", "history");
+      showToast(mode === "chat" ? "已新建问答会话" : "已新建自动台词会话", "success");
+    } catch (error) {
+      console.error(
+        "[StyleClone][createNewConversation] failed",
+        { characterId: selectedCharacter.id, error, mode },
+        new Date().toISOString(),
+      );
+      showToast("新建会话失败", "error");
+    }
+  }
+
+  async function renameExistingConversation(mode: ConversationMode, conversationId: string, title: string) {
+    try {
+      const conversation = await requestRenameConversation(selectedCharacter.id, conversationId, title);
+      const update = (current: ConversationSummary[]) =>
+        current
+          .map((item) => (item.id === conversation.id ? { ...item, ...conversation } : item))
+          .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+
+      if (mode === "chat") {
+        setChatConversations(update);
+      } else {
+        setAutoConversations(update);
+      }
+
+      showToast("会话已重命名", "success");
+    } catch (error) {
+      console.error(
+        "[StyleClone][renameExistingConversation] failed",
+        { characterId: selectedCharacter.id, conversationId, error, mode },
+        new Date().toISOString(),
+      );
+      showToast("重命名会话失败", "error");
+    }
+  }
+
+  async function deleteExistingConversation(mode: ConversationMode, conversationId: string) {
+    try {
+      await requestDeleteConversation(selectedCharacter.id, conversationId);
+
+      const currentList = mode === "chat" ? chatConversations : autoConversations;
+      const nextList = currentList.filter((conversation) => conversation.id !== conversationId);
+      const currentSelectedId = mode === "chat" ? selectedChatConversationId : selectedAutoConversationId;
+      const selectedStillExists = Boolean(
+        currentSelectedId &&
+          currentSelectedId !== conversationId &&
+          nextList.some((conversation) => conversation.id === currentSelectedId),
+      );
+      const nextConversationId = selectedStillExists ? currentSelectedId : nextList[0]?.id ?? null;
+      const shouldSwitchConversation = currentSelectedId === conversationId || !selectedStillExists;
+      let nextMessageCount = 0;
+
+      if (mode === "chat") {
+        setChatConversations(nextList);
+        setSelectedChatConversationId(nextConversationId);
+        if (shouldSwitchConversation) {
+          nextMessageCount = (await loadConversationMessages("chat", nextConversationId)).length;
+        }
+      } else {
+        setAutoConversations(nextList);
+        setSelectedAutoConversationId(nextConversationId);
+        if (shouldSwitchConversation) {
+          nextMessageCount = (await loadConversationMessages("auto", nextConversationId)).length;
+        }
+      }
+
+      if (shouldSwitchConversation) {
+        const nextState = nextConversationId && nextMessageCount > 0 ? mode : "ready";
+        setWorkspaceState(nextState);
+        writeUrl(nextState, "history");
+      }
+
+      showToast("会话已删除", "success");
+    } catch (error) {
+      console.error(
+        "[StyleClone][deleteExistingConversation] failed",
+        { characterId: selectedCharacter.id, conversationId, error, mode },
+        new Date().toISOString(),
+      );
+      showToast("删除会话失败", "error");
     }
   }
 
@@ -583,7 +961,11 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
       setIsAnswering(true);
 
       const response = await fetch(`/api/characters/${selectedCharacter.id}/chat`, {
-        body: JSON.stringify({ message, topK: 5 }),
+        body: JSON.stringify({
+          conversationId: selectedChatConversationId,
+          message,
+          topK: 5,
+        }),
         headers: { "Content-Type": "application/json" },
         method: "POST",
       });
@@ -614,6 +996,7 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
       showToast("生成回复失败", "error");
     } finally {
       setIsAnswering(false);
+      void refreshConversationLists();
     }
   }
 
@@ -659,7 +1042,11 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
       return;
     }
 
-    const data = JSON.parse(dataText) as { message?: string; text?: string };
+    const data = JSON.parse(dataText) as { conversationId?: string; message?: string; text?: string };
+
+    if (data.conversationId) {
+      setSelectedChatConversationId(data.conversationId);
+    }
 
     if (event === "delta" && data.text) {
       setChatMessages((current) =>
@@ -698,8 +1085,13 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
     goToState("auto");
 
     try {
+      const selectedAutoConversation = autoConversations.find(
+        (conversation) => conversation.id === selectedAutoConversationId,
+      );
+      const conversationId =
+        selectedAutoConversation && selectedAutoConversation.messageCount === 0 ? selectedAutoConversation.id : null;
       const response = await fetch(`/api/characters/${selectedCharacter.id}/auto/start`, {
-        body: JSON.stringify({ maxSegments: 12 }),
+        body: JSON.stringify({ conversationId, maxSegments: 12 }),
         headers: { "Content-Type": "application/json" },
         method: "POST",
         signal: controller.signal,
@@ -727,6 +1119,7 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
     } finally {
       setIsAutoGenerating(false);
       autoAbortController.current = null;
+      void refreshConversationLists();
     }
   }
 
@@ -853,11 +1246,16 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
     }
 
     const data = JSON.parse(dataText) as {
+      conversationId?: string;
       id?: string;
       kind?: ScriptKind;
       message?: string;
       text?: string;
     };
+
+    if (data.conversationId) {
+      setSelectedAutoConversationId(data.conversationId);
+    }
 
     if (event === "segment-start" && data.id && data.kind) {
       const segmentId = data.id;
@@ -933,13 +1331,25 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
 
       <ModalHost
         activeModal={activeModal}
+        autoConversations={autoConversations}
         character={selectedCharacter}
+        chatConversations={chatConversations}
         closeModal={closeModal}
         createCharacter={createCharacter}
         deleteCharacter={deleteSelectedCharacter}
+        historyMode={historyMode}
         onCalibrationSaved={(savedExtraCount) => {
           showToast(savedExtraCount > 0 ? `已保存 ${savedExtraCount} 条校准范本` : "风格校准完成", "success");
         }}
+        onCreateConversation={(mode) => void createNewConversation(mode)}
+        onDeleteConversation={(mode, conversationId) => void deleteExistingConversation(mode, conversationId)}
+        onHistoryModeChange={setHistoryMode}
+        onRenameConversation={(mode, conversationId, title) =>
+          void renameExistingConversation(mode, conversationId, title)
+        }
+        onSelectConversation={(mode, conversationId) => void selectConversation(mode, conversationId)}
+        selectedAutoConversationId={selectedAutoConversationId}
+        selectedChatConversationId={selectedChatConversationId}
         uploadMaterial={uploadMaterial}
       />
 
@@ -1008,6 +1418,10 @@ export function StyleCloneWorkbench({ initialState, initialModal }: StyleCloneWo
           onCopyAll={() => void copyCurrentExport()}
           onDownloadExport={downloadCurrentExport}
           onOpenCalibration={() => openModal("calibration")}
+          onOpenHistory={() => {
+            setHistoryMode(workspaceState === "auto" ? "auto" : "chat");
+            openModal("history");
+          }}
           onOpenSettings={() => openModal("styleSettings")}
           onRetryTraining={() => openModal("upload")}
           onToggleAuto={() => {
@@ -1191,6 +1605,7 @@ function CharacterHeader({
   onCopyAll,
   onDownloadExport,
   onOpenCalibration,
+  onOpenHistory,
   onOpenSettings,
   onRetryTraining,
   onToggleAuto,
@@ -1203,6 +1618,7 @@ function CharacterHeader({
   onCopyAll: () => void;
   onDownloadExport: () => void;
   onOpenCalibration: () => void;
+  onOpenHistory: () => void;
   onOpenSettings: () => void;
   onRetryTraining: () => void;
   onToggleAuto: () => void;
@@ -1246,6 +1662,10 @@ function CharacterHeader({
       )}
       {status === "ready" && (
         <>
+          <Button onClick={onOpenHistory} size="sm" variant="secondary">
+            <FileText size={16} />
+            历史
+          </Button>
           <Button onClick={onOpenCalibration} size="sm" variant="secondary">
             <Sparkles size={16} />
             校准
@@ -1782,19 +2202,39 @@ function AutoMessage({
 
 function ModalHost({
   activeModal,
+  autoConversations,
   character,
+  chatConversations,
   closeModal,
   createCharacter,
   deleteCharacter,
+  historyMode,
   onCalibrationSaved,
+  onCreateConversation,
+  onDeleteConversation,
+  onHistoryModeChange,
+  onRenameConversation,
+  onSelectConversation,
+  selectedAutoConversationId,
+  selectedChatConversationId,
   uploadMaterial,
 }: {
   activeModal: ModalKey | null;
+  autoConversations: ConversationSummary[];
   character: Character;
+  chatConversations: ConversationSummary[];
   closeModal: () => void;
   createCharacter: (input: { category: Category; name: string }) => Promise<void>;
   deleteCharacter: () => void;
+  historyMode: ConversationMode;
   onCalibrationSaved: (savedExtraCount: number) => void;
+  onCreateConversation: (mode: ConversationMode) => void;
+  onDeleteConversation: (mode: ConversationMode, conversationId: string) => void;
+  onHistoryModeChange: (mode: ConversationMode) => void;
+  onRenameConversation: (mode: ConversationMode, conversationId: string, title: string) => void;
+  onSelectConversation: (mode: ConversationMode, conversationId: string) => void;
+  selectedAutoConversationId: string | null;
+  selectedChatConversationId: string | null;
   uploadMaterial: (input: { characterId: string; filename: string; text: string }) => Promise<void>;
 }) {
   if (!activeModal) {
@@ -1803,6 +2243,25 @@ function ModalHost({
 
   if (activeModal === "styleSettings") {
     return <StyleSettingsDrawer character={character} closeModal={closeModal} />;
+  }
+
+  if (activeModal === "history") {
+    return (
+      <ConversationHistoryDrawer
+        autoConversations={autoConversations}
+        character={character}
+        chatConversations={chatConversations}
+        closeModal={closeModal}
+        mode={historyMode}
+        onCreateConversation={onCreateConversation}
+        onDeleteConversation={onDeleteConversation}
+        onModeChange={onHistoryModeChange}
+        onRenameConversation={onRenameConversation}
+        onSelectConversation={onSelectConversation}
+        selectedAutoConversationId={selectedAutoConversationId}
+        selectedChatConversationId={selectedChatConversationId}
+      />
+    );
   }
 
   if (activeModal === "upload") {
@@ -1944,6 +2403,248 @@ function NewCharacterModal({
         </Button>
       </div>
     </CenterModal>
+  );
+}
+
+function formatConversationTime(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "时间未知";
+  }
+
+  return date.toLocaleString("zh-CN", {
+    day: "2-digit",
+    hour: "2-digit",
+    hour12: false,
+    minute: "2-digit",
+    month: "2-digit",
+  });
+}
+
+function getConversationTitle(conversation: ConversationSummary, mode: ConversationMode, index: number) {
+  const title = conversation.title?.trim();
+
+  if (title) {
+    return title;
+  }
+
+  return `${mode === "chat" ? "问答" : "自动台词"} ${index + 1}`;
+}
+
+function ConversationHistoryDrawer({
+  autoConversations,
+  character,
+  chatConversations,
+  closeModal,
+  mode,
+  onCreateConversation,
+  onDeleteConversation,
+  onModeChange,
+  onRenameConversation,
+  onSelectConversation,
+  selectedAutoConversationId,
+  selectedChatConversationId,
+}: {
+  autoConversations: ConversationSummary[];
+  character: Character;
+  chatConversations: ConversationSummary[];
+  closeModal: () => void;
+  mode: ConversationMode;
+  onCreateConversation: (mode: ConversationMode) => void;
+  onDeleteConversation: (mode: ConversationMode, conversationId: string) => void;
+  onModeChange: (mode: ConversationMode) => void;
+  onRenameConversation: (mode: ConversationMode, conversationId: string, title: string) => void;
+  onSelectConversation: (mode: ConversationMode, conversationId: string) => void;
+  selectedAutoConversationId: string | null;
+  selectedChatConversationId: string | null;
+}) {
+  const [draftTitle, setDraftTitle] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const conversations = mode === "chat" ? chatConversations : autoConversations;
+  const selectedConversationId = mode === "chat" ? selectedChatConversationId : selectedAutoConversationId;
+  const modeLabel = mode === "chat" ? "问答" : "自动台词";
+
+  function beginRename(conversation: ConversationSummary, index: number) {
+    setEditingId(conversation.id);
+    setDraftTitle(getConversationTitle(conversation, mode, index));
+  }
+
+  function cancelRename() {
+    setEditingId(null);
+    setDraftTitle("");
+  }
+
+  function commitRename(conversationId: string) {
+    const title = draftTitle.trim();
+
+    if (!title) {
+      cancelRename();
+      return;
+    }
+
+    onRenameConversation(mode, conversationId, title);
+    cancelRename();
+  }
+
+  function confirmDelete(conversation: ConversationSummary) {
+    if (!window.confirm("删除这个会话？历史消息会一起删除。")) {
+      return;
+    }
+
+    onDeleteConversation(mode, conversation.id);
+  }
+
+  return (
+    <div className="drawer-wrap">
+      <aside aria-label="历史会话" aria-modal="true" className="drawer-panel" role="dialog">
+        <div className="drawer-head">
+          <div>
+            <h2 className="text-lg font-semibold leading-tight">历史会话</h2>
+            <p className="t-cap mt-1">{character.name}</p>
+          </div>
+          <button aria-label="关闭" className="copy-fab static h-7 w-7" onClick={closeModal} type="button">
+            <X size={15} />
+          </button>
+        </div>
+
+        <div className="drawer-body">
+          <div className="field">
+            <label>类型</label>
+            <Segmented
+              options={[
+                ["chat", "问答"],
+                ["auto", "自动台词"],
+              ]}
+              value={mode}
+              onChange={(nextMode) => {
+                cancelRename();
+                onModeChange(nextMode);
+              }}
+            />
+          </div>
+
+          <div className="flex min-h-0 flex-1 flex-col gap-2.5">
+            {conversations.length === 0 ? (
+              <div className="flex min-h-[240px] flex-col items-center justify-center rounded-md border border-dashed border-border bg-[#FCFDFE] px-6 text-center">
+                <div className="dropzone-icon mb-3">
+                  <FileText size={19} />
+                </div>
+                <h3 className="text-sm font-semibold text-text-1">暂无{modeLabel}会话</h3>
+                <p className="mt-1 text-[13px] leading-[1.7] text-text-2">新建后可从这里切换和管理记录。</p>
+                <Button className="mt-4" onClick={() => onCreateConversation(mode)} size="sm">
+                  <Plus size={16} />
+                  新建{modeLabel}
+                </Button>
+              </div>
+            ) : (
+              conversations.map((conversation, index) => {
+                const title = getConversationTitle(conversation, mode, index);
+                const selected = conversation.id === selectedConversationId;
+                const editing = conversation.id === editingId;
+
+                return (
+                  <div
+                    className={cn(
+                      "rounded-md border px-3.5 py-3 transition-colors",
+                      selected ? "border-primary bg-primary-light" : "border-border bg-white hover:bg-[#FCFDFE]",
+                    )}
+                    key={conversation.id}
+                  >
+                    <div className="flex items-start gap-2">
+                      {editing ? (
+                        <input
+                          autoFocus
+                          className="field-input h-8 min-w-0 flex-1"
+                          onChange={(event) => setDraftTitle(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              commitRename(conversation.id);
+                            }
+                            if (event.key === "Escape") {
+                              cancelRename();
+                            }
+                          }}
+                          value={draftTitle}
+                        />
+                      ) : (
+                        <button
+                          className="min-w-0 flex-1 text-left"
+                          onClick={() => onSelectConversation(mode, conversation.id)}
+                          type="button"
+                        >
+                          <span className="block truncate text-sm font-semibold text-text-1">{title}</span>
+                          <span className="mt-1 line-clamp-2 block text-[13px] leading-[1.6] text-text-2">
+                            {conversation.latestMessagePreview || "空会话"}
+                          </span>
+                        </button>
+                      )}
+
+                      {editing ? (
+                        <>
+                          <button
+                            aria-label="保存会话名称"
+                            className="copy-fab static h-8 w-8"
+                            onClick={() => commitRename(conversation.id)}
+                            title="保存"
+                            type="button"
+                          >
+                            <Check size={14} />
+                          </button>
+                          <button
+                            aria-label="取消重命名"
+                            className="copy-fab static h-8 w-8"
+                            onClick={cancelRename}
+                            title="取消"
+                            type="button"
+                          >
+                            <X size={14} />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            aria-label="重命名会话"
+                            className="copy-fab static h-8 w-8"
+                            onClick={() => beginRename(conversation, index)}
+                            title="重命名"
+                            type="button"
+                          >
+                            <Pencil size={14} />
+                          </button>
+                          <button
+                            aria-label="删除会话"
+                            className="copy-fab static h-8 w-8"
+                            onClick={() => confirmDelete(conversation)}
+                            title="删除"
+                            type="button"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </>
+                      )}
+                    </div>
+
+                    <div className="mt-3 flex items-center justify-between gap-3 text-[12px] text-text-3">
+                      <span>{conversation.messageCount} 条消息</span>
+                      <span>{formatConversationTime(conversation.updatedAt)}</span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        <div className="modal-foot">
+          <Button onClick={() => onCreateConversation(mode)} variant="secondary">
+            <Plus size={16} />
+            新建{modeLabel}
+          </Button>
+          <Button onClick={closeModal}>完成</Button>
+        </div>
+      </aside>
+    </div>
   );
 }
 

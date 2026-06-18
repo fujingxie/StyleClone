@@ -6,6 +6,7 @@ import {
   buildAutoScriptMessages,
   getAutoScriptKind,
 } from "@/lib/autoscript";
+import { appendConversationMessage, createConversation, getConversationById } from "@/lib/conversations";
 import { prisma } from "@/lib/db";
 import { streamDeepSeekChat } from "@/lib/llm";
 import { retrieveRelevantChunks } from "@/lib/retrieval";
@@ -43,9 +44,11 @@ function normalizeMaxSegments(value: unknown) {
 export async function POST(request: Request, { params }: RouteContext) {
   try {
     const body = (await request.json().catch(() => ({}))) as {
+      conversationId?: unknown;
       maxSegments?: unknown;
     };
     const maxSegments = normalizeMaxSegments(body.maxSegments);
+    const requestedConversationId = typeof body.conversationId === "string" ? body.conversationId.trim() : "";
     const character = await prisma.character.findUnique({
       select: {
         category: true,
@@ -71,6 +74,25 @@ export async function POST(request: Request, { params }: RouteContext) {
       take: 20,
       where: { characterId: params.id },
     });
+    const existingConversation = requestedConversationId
+      ? await getConversationById({
+          characterId: params.id,
+          conversationId: requestedConversationId,
+          mode: "auto",
+        })
+      : null;
+
+    if (requestedConversationId && !existingConversation) {
+      return NextResponse.json({ error: "会话不存在" }, { status: 404 });
+    }
+
+    const conversation =
+      existingConversation ??
+      (await createConversation({
+        characterId: params.id,
+        mode: "auto",
+        title: `自动台词 ${new Date().toLocaleString("zh-CN", { hour12: false })}`,
+      }));
     const sessionId = beginAutoSession(params.id);
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
@@ -78,7 +100,15 @@ export async function POST(request: Request, { params }: RouteContext) {
         const previousSegments: AutoScriptSegment[] = [];
 
         try {
-          controller.enqueue(encoder.encode(encodeSse("start", { maxSegments, sessionId })));
+          controller.enqueue(
+            encoder.encode(
+              encodeSse("start", {
+                conversationId: conversation.id,
+                maxSegments,
+                sessionId,
+              }),
+            ),
+          );
 
           for (let index = 0; index < maxSegments; index += 1) {
             if (request.signal.aborted || isAutoSessionStopped(params.id, sessionId)) {
@@ -120,8 +150,24 @@ export async function POST(request: Request, { params }: RouteContext) {
 
             const segment = { kind, text: text.trim() };
             previousSegments.push(segment);
+            const savedMessage = await appendConversationMessage({
+              characterId: params.id,
+              content: segment.text,
+              conversationId: conversation.id,
+              kind: segment.kind,
+              role: "auto",
+            });
             controller.enqueue(
-              encoder.encode(encodeSse("segment-done", { id: segmentId, index, kind, text: segment.text })),
+              encoder.encode(
+                encodeSse("segment-done", {
+                  conversationId: conversation.id,
+                  id: segmentId,
+                  index,
+                  kind,
+                  messageId: savedMessage.id,
+                  text: segment.text,
+                }),
+              ),
             );
           }
 

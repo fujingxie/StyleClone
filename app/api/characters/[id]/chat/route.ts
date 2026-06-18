@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 
+import {
+  appendConversationMessage,
+  getConversationById,
+  getOrCreateLatestConversation,
+} from "@/lib/conversations";
 import { prisma } from "@/lib/db";
 import { streamDeepSeekChat } from "@/lib/llm";
 import { buildQaMessages } from "@/lib/prompt";
@@ -20,9 +25,11 @@ function encodeSse(event: string, data: unknown) {
 export async function POST(request: Request, { params }: RouteContext) {
   try {
     const body = (await request.json()) as {
+      conversationId?: unknown;
       message?: unknown;
       topK?: unknown;
     };
+    const conversationId = typeof body.conversationId === "string" ? body.conversationId : null;
     const message = typeof body.message === "string" ? body.message.trim() : "";
     const topK = typeof body.topK === "number" ? body.topK : undefined;
 
@@ -69,6 +76,27 @@ export async function POST(request: Request, { params }: RouteContext) {
       retrievedChunks,
       userMessage: message,
     });
+    const conversation = conversationId
+      ? await getConversationById({
+          characterId: params.id,
+          conversationId,
+          mode: "chat",
+        })
+      : await getOrCreateLatestConversation({
+          characterId: params.id,
+          mode: "chat",
+          title: message.slice(0, 40),
+        });
+
+    if (!conversation) {
+      return NextResponse.json({ error: "会话不存在" }, { status: 404 });
+    }
+    const userMessage = await appendConversationMessage({
+      characterId: params.id,
+      content: message,
+      conversationId: conversation.id,
+      role: "user",
+    });
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -78,8 +106,10 @@ export async function POST(request: Request, { params }: RouteContext) {
           controller.enqueue(
             encoder.encode(
               encodeSse("context", {
+                conversationId: conversation.id,
                 exemplarCount: exemplars.length,
                 retrievedChunkCount: retrievedChunks.length,
+                userMessageId: userMessage.id,
               }),
             ),
           );
@@ -89,7 +119,21 @@ export async function POST(request: Request, { params }: RouteContext) {
             controller.enqueue(encoder.encode(encodeSse("delta", { text: delta })));
           }
 
-          controller.enqueue(encoder.encode(encodeSse("done", { text: answer })));
+          const assistantMessage = await appendConversationMessage({
+            characterId: params.id,
+            content: answer,
+            conversationId: conversation.id,
+            role: "assistant",
+          });
+          controller.enqueue(
+            encoder.encode(
+              encodeSse("done", {
+                assistantMessageId: assistantMessage.id,
+                conversationId: conversation.id,
+                text: answer,
+              }),
+            ),
+          );
         } catch (error) {
           console.error(
             "[api/characters/:id/chat][stream] failed",
